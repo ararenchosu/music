@@ -1,0 +1,187 @@
+# -*- coding: utf-8 -*-
+"""
+store.py — 永続化（data.json）
+
+保存するもの:
+- guilds:    サーバーごとの設定（DJロール / デフォルト音量 / 自動退出秒数 /
+             常駐モード / 再生開始のお知らせ）
+- panels:    常設パネルの設置場所（guild_id -> {channel, message}）
+- favorites: ユーザーごとのお気に入り曲リスト
+- mylists:   ユーザーごとのマイリスト（名前 -> 曲リスト）
+- history:   サーバーごとの再生履歴（直近分のみ）
+
+書き込みは「全部を1回で書く」単純な方式。スマホ運用の小規模BOT前提で、
+競合よりも壊れにくさを優先する（書き込み途中の破損に備えて一時ファイル経由）。
+"""
+
+import json
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_FILE = BASE_DIR / "data.json"
+
+DEFAULT_GUILD_CONFIG = {
+    "dj_role_id": None,        # DJロールID（未設定なら全員操作可）
+    "default_volume": 100,     # 0-200
+    "idle_seconds": 180,       # 無再生が続いたら退出するまでの秒数
+    "alone_seconds": 60,       # BOTだけがVCに残ったら退出するまでの秒数
+    "stay_247": False,         # 24時間常駐モード（自動退出を無効化）
+    "announce": True,          # 再生開始通知を出すか
+}
+
+HISTORY_LIMIT = 50
+
+_data: dict = {
+    "guilds": {},
+    "panels": {},
+    "favorites": {},
+    "mylists": {},
+    "history": {},
+}
+
+
+def load_data() -> dict:
+    """data.json を読む。無ければデフォルト構造で開始する。"""
+    global _data
+    try:
+        raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            for key in _data:
+                if isinstance(raw.get(key), dict):
+                    _data[key] = raw[key]
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"⚠️ data.json の読み込みに失敗（初期状態で開始）: {e}")
+    return _data
+
+
+def save_data() -> None:
+    """一時ファイルへ書いてから置き換える（途中で落ちても本体を壊さない）。"""
+    try:
+        tmp = DATA_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, DATA_FILE)
+    except Exception as e:
+        print(f"⚠️ data.json の保存に失敗: {e}")
+
+
+def data() -> dict:
+    return _data
+
+
+# ---------------------------------------------------------------- サーバー設定
+def guild_config(guild_id: int) -> dict:
+    """サーバー設定を返す（無ければデフォルトで作る）。"""
+    key = str(guild_id)
+    cfg = _data["guilds"].get(key)
+    if cfg is None:
+        cfg = dict(DEFAULT_GUILD_CONFIG)
+        _data["guilds"][key] = cfg
+        save_data()
+    else:
+        # 旧データに項目が足りない場合はデフォルトで補う
+        for k, v in DEFAULT_GUILD_CONFIG.items():
+            cfg.setdefault(k, v)
+    return cfg
+
+
+def set_guild_config(guild_id: int, **kwargs) -> dict:
+    cfg = guild_config(guild_id)
+    cfg.update(kwargs)
+    save_data()
+    return cfg
+
+
+# ---------------------------------------------------------------- パネル設置場所
+def save_panel(guild_id: int, channel_id: int, message_id: int) -> None:
+    _data["panels"][str(guild_id)] = {"channel": channel_id, "message": message_id}
+    save_data()
+
+
+def panel_locations() -> dict:
+    return dict(_data["panels"])
+
+
+def drop_panel(guild_id: int) -> None:
+    _data["panels"].pop(str(guild_id), None)
+    save_data()
+
+
+# ---------------------------------------------------------------- お気に入り
+def favorites(user_id: int) -> list:
+    return _data["favorites"].setdefault(str(user_id), [])
+
+
+def add_favorite(user_id: int, track_dict: dict) -> bool:
+    """追加したら True、既に同じURLがあれば False。"""
+    favs = favorites(user_id)
+    if any(f.get("webpage_url") == track_dict.get("webpage_url") for f in favs):
+        return False
+    favs.append(track_dict)
+    save_data()
+    return True
+
+
+def remove_favorite(user_id: int, index: int) -> dict | None:
+    favs = favorites(user_id)
+    if 0 <= index < len(favs):
+        removed = favs.pop(index)
+        save_data()
+        return removed
+    return None
+
+
+# ---------------------------------------------------------------- マイリスト
+def mylists(user_id: int) -> dict:
+    return _data["mylists"].setdefault(str(user_id), {})
+
+
+def create_mylist(user_id: int, name: str) -> bool:
+    lists = mylists(user_id)
+    if name in lists:
+        return False
+    lists[name] = []
+    save_data()
+    return True
+
+
+def delete_mylist(user_id: int, name: str) -> bool:
+    lists = mylists(user_id)
+    if name not in lists:
+        return False
+    del lists[name]
+    save_data()
+    return True
+
+
+def add_to_mylist(user_id: int, name: str, track_dict: dict) -> bool:
+    lists = mylists(user_id)
+    if name not in lists:
+        return False
+    lists[name].append(track_dict)
+    save_data()
+    return True
+
+
+def remove_from_mylist(user_id: int, name: str, index: int) -> dict | None:
+    lists = mylists(user_id)
+    tracks = lists.get(name)
+    if tracks is None or not (0 <= index < len(tracks)):
+        return None
+    removed = tracks.pop(index)
+    save_data()
+    return removed
+
+
+# ---------------------------------------------------------------- 再生履歴
+def push_history(guild_id: int, track_dict: dict) -> None:
+    hist = _data["history"].setdefault(str(guild_id), [])
+    hist.insert(0, track_dict)
+    del hist[HISTORY_LIMIT:]
+    save_data()
+
+
+def history(guild_id: int, limit: int = 10) -> list:
+    return list(_data["history"].get(str(guild_id), []))[:limit]
