@@ -87,6 +87,30 @@ async def _redraw(bot: commands.Bot, player: GuildPlayer):
 redraw_panel = _redraw
 
 
+async def repost_panel(bot: commands.Bot, player: GuildPlayer):
+    """パネルを消して、設置チャンネルの一番下に再投稿する。
+
+    再生中お知らせの直後に呼ぶことで、パネルが常に最新の位置に来る。
+    設置記録が無いサーバーでは何もしない。
+    """
+    loc = store.panel_locations().get(str(player.guild_id))
+    if not loc:
+        return
+    try:
+        channel = bot.get_channel(loc["channel"])
+        if channel is None:
+            channel = await bot.fetch_channel(loc["channel"])
+        try:
+            old = await channel.fetch_message(loc["message"])
+            await old.delete()
+        except discord.NotFound:
+            pass
+        msg = await channel.send(embed=panel_embed(player), view=MusicPanelView(bot))
+        store.save_panel(player.guild_id, channel.id, msg.id)
+    except Exception:
+        pass
+
+
 async def redraw_all_panels(bot: commands.Bot):
     """on_ready 用: 保存されている全パネルを再描画する。"""
     for gid in store.panel_locations():
@@ -302,6 +326,7 @@ class SettingsView(discord.ui.View):
         ("alone_seconds", "BOTだけ残った時の自動退出（秒）"),
         ("stay_247", "24時間常駐モード ON/OFF"),
         ("announce", "再生開始のお知らせ ON/OFF"),
+        ("repost_panel", "お知らせ後にパネルを再設置 ON/OFF"),
     ]
 
     def __init__(self, bot: commands.Bot, guild_id: int):
@@ -320,6 +345,8 @@ class SettingsView(discord.ui.View):
                 desc = f"現在: {'ON' if cfg.get('stay_247') else 'OFF'}"
             elif key == "announce":
                 desc = f"現在: {'ON' if cfg.get('announce') else 'OFF'}"
+            elif key == "repost_panel":
+                desc = f"現在: {'ON' if cfg.get('repost_panel') else 'OFF'}"
             options.append(discord.SelectOption(label=label, value=key, description=desc[:100]))
         select = discord.ui.Select(placeholder="変更する設定を選んでください", options=options)
         select.callback = self._on_pick
@@ -327,12 +354,13 @@ class SettingsView(discord.ui.View):
 
     async def _on_pick(self, interaction: discord.Interaction):
         key = interaction.data["values"][0]
-        if key in ("stay_247", "announce"):
+        if key in ("stay_247", "announce", "repost_panel"):
             await _safe_defer(interaction)
             cfg = store.guild_config(self.guild_id)
             new_val = not cfg.get(key, False)
             store.set_guild_config(self.guild_id, **{key: new_val})
-            label = "24時間常駐モード" if key == "stay_247" else "再生開始のお知らせ"
+            label = {"stay_247": "24時間常駐モード", "announce": "再生開始のお知らせ",
+                     "repost_panel": "お知らせ後にパネルを再設置"}[key]
             try:
                 await interaction.followup.send(
                     f"⚙️ {label} を **{'ON' if new_val else 'OFF'}** にしました", ephemeral=True)
