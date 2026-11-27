@@ -70,6 +70,43 @@ def resolve_ffmpeg() -> str:
 FFMPEG = resolve_ffmpeg()
 FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
+# ---------------------------------------------------------------- libopus
+def load_opus() -> bool:
+    """音声エンコードに必須の libopus を明示的に読み込む。
+
+    Termux 等では標準の探索で見つからないことがあるため、候補パスを順に試す。
+    これが未ロードだと「再生処理は進むのに誰にも音が聞こえない」状態になる。
+    """
+    try:
+        import discord.opus
+        if discord.opus.is_loaded():
+            return True
+        candidates = [
+            "libopus.so.0", "libopus.so", "libopus-0.so", "opus",
+            "/data/data/com.termux/files/usr/lib/libopus.so",
+            "/data/data/com.termux/files/usr/lib/libopus.so.0",
+        ]
+        prefix = os.getenv("PREFIX", "").strip()
+        if prefix:
+            candidates += [os.path.join(prefix, "lib", "libopus.so"),
+                           os.path.join(prefix, "lib", "libopus.so.0")]
+        for name in candidates:
+            try:
+                discord.opus.load_opus(name)
+                if discord.opus.is_loaded():
+                    print(f"🎧 libopus: ロード成功 ({name})")
+                    return True
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"🎧 libopus: ロード失敗: {e}")
+    print("🎧 libopus: ⚠️ 未ロード（音が出ない原因になります。"
+          "Termuxでは pkg install libopus を確認してください）")
+    return False
+
+
+OPUS_LOADED = load_opus()
+
 # ---------------------------------------------------------------- クッキー
 def prepare_cookie_file() -> Optional[str]:
     """優先順位: 同フォルダの cookies.txt / YT_COOKIES_FILE / YT_COOKIES_B64。"""
@@ -176,6 +213,7 @@ class SuperMusicBot(commands.Bot):
     async def on_ready(self):
         print(f"✅ ログインしました: {self.user} (ID: {self.user.id})")
         print(f"🎬 FFmpeg: {FFMPEG}")
+        print(f"🎧 libopus: {'OK' if OPUS_LOADED else 'NG（未ロード）'}")
         print(f"🍪 クッキー: {'使用中' if COOKIE_FILE else 'なし'}")
         await self.change_presence(
             activity=discord.Activity(
