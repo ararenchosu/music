@@ -58,7 +58,9 @@ async def _fire(guild, item: dict):
             pass
     text = item.get("text") or "時間になりました"
     if session.connected():
-        await enqueue(session, f"⏰ タイマーです。{text}",
+        tmpl = cfg.get("timer_text") or "タイマーです。{text}"
+        spoken = tmpl.replace("{text}", text) if "{text}" in tmpl else f"{tmpl} {text}"
+        await enqueue(session, f"⏰ {spoken}",
                       cfg.get("default_voice", DEFAULT_VOICE),
                       cfg.get("rate", "+0%"))
         return
