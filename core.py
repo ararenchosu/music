@@ -219,11 +219,13 @@ class SuperMusicBot(commands.Bot):
     async def setup_hook(self):
         # import はここで遅延（panel -> player -> core の循環を避ける）
         import store
-        from panel import MusicPanelView, SubPanelView, LyricsPanelView
+        from panel import (MusicPanelView, SubPanelView, LyricsPanelView,
+                           LyricsSearchPanelView)
         store.load_data()
         self.add_view(MusicPanelView(self))
         self.add_view(SubPanelView(self))
         self.add_view(LyricsPanelView(self))
+        self.add_view(LyricsSearchPanelView(self))
         await self.tree.sync()
 
     async def on_ready(self):
