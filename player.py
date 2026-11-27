@@ -26,6 +26,12 @@ async def _redraw(bot, player: "GuildPlayer"):
     await redraw_panel(bot, player)
 
 
+async def _repost(bot, player: "GuildPlayer"):
+    """パネル再設置（panel.py との循環import回避のため遅延import）。"""
+    from panel import repost_panel
+    await repost_panel(bot, player)
+
+
 class GuildPlayer:
     def __init__(self, guild_id: int):
         self.guild_id = guild_id
@@ -154,14 +160,20 @@ async def play_next(bot: commands.Bot, player: GuildPlayer):
     player.voice.play(source, after=_after)
     store.push_history(player.guild_id, track.to_dict())
     cfg = store.guild_config(player.guild_id)
+    announced = False
     if cfg.get("announce", True) and player.text_channel_id:
         channel = bot.get_channel(player.text_channel_id)
         if channel is not None:
             try:
                 await channel.send(f"🎵 再生中: **{track.title}**（{track.duration_text()}）")
+                announced = True
             except Exception:
                 pass
-    await _redraw(bot, player)
+    if announced and cfg.get("repost_panel", True):
+        # お知らせの直後にパネルを一番下へ置き直す（流れて埋もれないように）
+        await _repost(bot, player)
+    else:
+        await _redraw(bot, player)
 
 
 async def advance(bot: commands.Bot, player: GuildPlayer):
