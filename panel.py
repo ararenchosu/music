@@ -462,10 +462,44 @@ class LyricsSearchPanelView(discord.ui.View):
                                 style=discord.ButtonStyle.primary)
         btn.callback = self._on_search
         self.add_item(btn)
+        btn2 = discord.ui.Button(custom_id="super_music:lyrics_search_refresh",
+                                 label="手動更新", emoji="🔄",
+                                 style=discord.ButtonStyle.secondary)
+        btn2.callback = self._on_refresh
+        self.add_item(btn2)
 
     async def _on_search(self, interaction: discord.Interaction):
         if not interaction.response.is_done():
             await interaction.response.send_modal(LyricsSearchModal(self.bot))
+
+    async def _on_refresh(self, interaction: discord.Interaction):
+        """最後に検索した条件でもう一度探して、パネルの表示を更新する。"""
+        gid = interaction.guild_id
+        state = _lyrics_search_state.get(gid)
+        if state is None:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "まだ検索されていません。"
+                    "先に「歌詞を検索（アーティスト＋曲名）」から探してください",
+                    ephemeral=True)
+            return
+        artist, song, _old = state
+        await _safe_defer(interaction)
+        cands = await lyrics_mod.search_lyrics_candidates(artist, song)
+        new_text = None
+        if cands:
+            pick = next((c for c in cands
+                         if c["track"] == song and c["artist"] == artist),
+                        cands[0])
+            artist, song, new_text = pick["artist"], pick["track"], pick["text"]
+        _lyrics_search_state[gid] = (artist, song, new_text)
+        if interaction.message is not None:
+            try:
+                await interaction.message.edit(
+                    embed=lyrics_search_embed(gid),
+                    view=LyricsSearchPanelView(self.bot))
+            except discord.NotFound:
+                pass
 
 
 # ---------------------------------------------------------------- 汎用: 安全な defer
