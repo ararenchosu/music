@@ -82,6 +82,8 @@ class GuildPlayer:
         self.last_voice_channel_id: Optional[int] = None
         self.rejoin_task: Optional[asyncio.Task] = None
         self.stopping: bool = False
+        # オートプレイの種曲キャッシュ: (設定文字列, 解決した曲)
+        self.seed_cache: Optional[tuple[str, Optional[Track]]] = None
 
     # ---- キュー操作
     def enqueue(self, track: Track) -> int:
@@ -199,6 +201,28 @@ def schedule_prefetch(player: GuildPlayer):
         player.prefetch_pending.discard(url)
 
 
+async def _autoplay_seed(player: GuildPlayer, cfg: dict) -> Optional[Track]:
+    """設定された種曲を解決して返す（未設定・失敗時は None）。
+
+    種曲はアーティスト名・曲名・URLのどれでも可。解決結果はキャッシュし、
+    設定が変わった時だけ取り直す。
+    """
+    q = (cfg.get("autoplay_seed") or "").strip()
+    if not q:
+        return None
+    if player.seed_cache and player.seed_cache[0] == q:
+        return player.seed_cache[1]
+    track: Optional[Track] = None
+    try:
+        tracks, _ = await resolve_query(q, "オートプレイ")
+        if tracks:
+            track = tracks[0]
+    except Exception:
+        track = None
+    player.seed_cache = (q, track)
+    return track
+
+
 PLAYERS: dict[int, GuildPlayer] = {}
 
 
@@ -266,13 +290,21 @@ async def play_next(bot: commands.Bot, player: GuildPlayer):
         cfg = store.guild_config(player.guild_id)
         # --- オートプレイ: キューが尽きたら関連曲を補充して流し続ける
         if not player.queue and cfg.get("autoplay") and player.current is not None:
-            seed = player.current
+            seed = await _autoplay_seed(player, cfg) or player.current
             related = []
             try:
                 related = await fetch_related_tracks(
                     seed, seed.requester, player.played_urls, limit=10)
             except Exception:
                 related = []
+            if not related and (cfg.get("autoplay_seed") or "").strip():
+                # 種曲固定で候補が尽きたら、再生済みをリセットしてもう一周する
+                player.played_urls = {player.current.webpage_url}
+                try:
+                    related = await fetch_related_tracks(
+                        seed, seed.requester, player.played_urls, limit=10)
+                except Exception:
+                    related = []
             if related:
                 for t in related:
                     player.enqueue(t)
@@ -281,7 +313,7 @@ async def play_next(bot: commands.Bot, player: GuildPlayer):
                     if channel is not None:
                         try:
                             await channel.send(
-                                f"📻 オートプレイ: 関連曲を{len(related)}曲追加しました",
+                                f"📻 オートプレイ: 「{seed.title}」の関連曲を{len(related)}曲追加しました",
                                 **_send_kwargs(player))
                         except Exception:
                             pass
