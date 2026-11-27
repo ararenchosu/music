@@ -42,6 +42,9 @@ RATE_LABELS = {"-20%": "ゆっくり", "+0%": "普通", "+25%": "やや速い", 
 # 1メッセージの最大読み上げ文字数の候補
 MAX_CHARS_CHOICES = [50, 100, 200, 300]
 
+# 読み上げ音量の候補（%）
+VOLUME_CHOICES = [50, 80, 100, 120, 150, 200]
+
 ALONE_LEAVE_SEC = 15     # VCが空になってから退出するまでの猶予（秒）
 QUEUE_MAX = 20           # 読み上げキューの上限（超過分は捨てる）
 
@@ -61,6 +64,7 @@ DEFAULT_CONFIG = {
     "only_vc_members": False,    # True = VC参加中の人の発言だけ読む
     "read_vc_chat": True,        # BOTが接続中のVC内チャットも読み上げる
     "default_voice": DEFAULT_VOICE,
+    "volume": 100,               # 読み上げ音量（%）
     "rate": "+0%",
     "max_chars": 100,
     "dictionary": {},            # サーバー共通の単語辞書 {単語: 読み}
