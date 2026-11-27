@@ -11,13 +11,35 @@ speech.py — 読み上げエンジン v2
 
 import asyncio
 import itertools
+import json
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
 import discord
 
-from core import bot, store, VOICES, TMP_DIR, QUEUE_MAX, voice_of
+from core import bot, store, VOICES, TMP_DIR, QUEUE_MAX, voice_of, BASE_DIR
+
+# ---------------------------------------------------------------- 音楽BOT連携ダッキング
+# 発話中は共有ファイルに「いつまで読み上げ中か」を書き、音楽BOT側が
+# それを見て音量を自動で下げる（2in1 / リポジトリ構成の両対応の場所）。
+DUCK_FILE = BASE_DIR.parent / "tts_duck.json"
+
+
+def _set_duck(seconds: float):
+    try:
+        DUCK_FILE.write_text(json.dumps({"until": time.time() + seconds}),
+                             encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _clear_duck():
+    try:
+        DUCK_FILE.write_text(json.dumps({"until": 0}), encoding="utf-8")
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------- テキスト整形
 _URL_RE = re.compile(r"https?://\S+|www\.\S+")
@@ -183,10 +205,20 @@ async def _worker(session: Session):
                 loop.call_soon_threadsafe(done.set)
 
             source = discord.FFmpegPCMAudio(str(path), options="-vn")
+            _set_duck(20)   # 音楽BOT側の音量を下げてもらう
             session.voice.play(source, after=_after)
             try:
-                await asyncio.wait_for(done.wait(), timeout=180)
-            except asyncio.TimeoutError:
+                # 再生中はダッキング期限を延長し続ける（最大180秒）
+                waited = 0.0
+                while not done.is_set() and waited < 180:
+                    try:
+                        await asyncio.wait_for(done.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        waited += 5
+                        _set_duck(20)
+            except Exception:
+                pass
+            if not done.is_set():
                 try:
                     session.voice.stop()
                 except Exception:
@@ -195,6 +227,8 @@ async def _worker(session: Session):
             print(f"⚠️ 読み上げに失敗 ({session.guild_id}): {e}")
         finally:
             session.now_text = None
+            if session.queue.empty():
+                _clear_duck()
             if path is not None:
                 try:
                     path.unlink(missing_ok=True)
