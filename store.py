@@ -32,7 +32,8 @@ DEFAULT_GUILD_CONFIG = {
     "autoplay": False,         # キューが尽きたら関連曲を自動で流し続けるか
     "last_vc_id": None,        # 最後に接続していたVC（常駐時の自動復帰先）
     "silent_notify": False,    # BOTのお知らせを通知なし（サイレント）で送るか
-    "autoplay_seed": "",       # オートプレイの種曲（空欄＝最後に再生した曲ベース）
+    "autoplay_seed": "",       # 旧・単一種曲（互換用。通常は autoplay_seeds を使う）
+    "autoplay_seeds": [],      # オートプレイの種曲リスト（複数可）
 }
 
 HISTORY_LIMIT = 50
@@ -93,6 +94,9 @@ def guild_config(guild_id: int) -> dict:
         # 旧データに項目が足りない場合はデフォルトで補う
         for k, v in DEFAULT_GUILD_CONFIG.items():
             cfg.setdefault(k, v)
+    # リスト型デフォルトの共有を防ぐ（サーバー間で同じリストを掴まない）
+    if cfg.get("autoplay_seeds") is DEFAULT_GUILD_CONFIG["autoplay_seeds"]:
+        cfg["autoplay_seeds"] = []
     return cfg
 
 
