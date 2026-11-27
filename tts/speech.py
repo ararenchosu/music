@@ -73,6 +73,8 @@ class Session:
         self.queue: asyncio.Queue = asyncio.Queue()
         self.worker: Optional[asyncio.Task] = None
         self.alone_task: Optional[asyncio.Task] = None
+        self.rejoin_task: Optional[asyncio.Task] = None
+        self.manual_left: bool = False   # 手動退出したら自動復帰しない
         self.now_text: Optional[str] = None
 
     def connected(self) -> bool:
