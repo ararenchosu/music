@@ -649,6 +649,7 @@ class SettingsView(discord.ui.View):
         ("autoplay", "関連曲オートプレイ ON/OFF"),
         ("silent_notify", "BOTのお知らせをサイレントにする ON/OFF"),
         ("ducking", "読み上げ中は音楽を自動で小さく ON/OFF"),
+        ("announce_tts", "曲名アナウンス（読み上げBOTが読み上げ） ON/OFF"),
         ("autoplay_seeds", "オートプレイの種曲リスト（複数登録可）"),
     ]
 
@@ -676,6 +677,8 @@ class SettingsView(discord.ui.View):
                 desc = f"現在: {'ON' if cfg.get('silent_notify') else 'OFF'}"
             elif key == "ducking":
                 desc = f"現在: {'ON' if cfg.get('ducking', True) else 'OFF'}"
+            elif key == "announce_tts":
+                desc = f"現在: {'ON' if cfg.get('announce_tts', True) else 'OFF'}"
             elif key == "autoplay_seeds":
                 _seeds = effective_seeds(cfg)
                 desc = f"現在: {len(_seeds)}件登録" if _seeds else "現在: 未設定（関連曲モード）"
@@ -686,7 +689,7 @@ class SettingsView(discord.ui.View):
 
     async def _on_pick(self, interaction: discord.Interaction):
         key = interaction.data["values"][0]
-        if key in ("stay_247", "announce", "repost_panel", "autoplay", "silent_notify", "ducking"):
+        if key in ("stay_247", "announce", "repost_panel", "autoplay", "silent_notify", "ducking", "announce_tts"):
             await _safe_defer(interaction)
             cfg = store.guild_config(self.guild_id)
             new_val = not cfg.get(key, False)
@@ -695,6 +698,7 @@ class SettingsView(discord.ui.View):
                      "repost_panel": "お知らせ後にパネルを再設置",
                      "autoplay": "関連曲オートプレイ",
                      "ducking": "読み上げ中は音楽を自動で小さく",
+                     "announce_tts": "曲名アナウンス（読み上げBOT連携）",
                      "silent_notify": "BOTのお知らせをサイレントにする"}[key]
             try:
                 await interaction.followup.send(
