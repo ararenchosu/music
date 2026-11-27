@@ -38,6 +38,7 @@ def panel_embed(guild: discord.Guild) -> discord.Embed:
     embed.add_field(name="対象VC", value=vc.name if vc else "自動（人がいるVC）", inline=True)
     embed.add_field(name="読み上げ", value="ON" if cfg.get("enabled", True) else "OFF", inline=True)
     embed.add_field(name="常駐モード", value="ON" if cfg.get("stay_247") else "OFF", inline=True)
+    embed.add_field(name="曲名アナウンス", value="ON" if cfg.get("announce_music", True) else "OFF", inline=True)
     embed.add_field(name="名前読み上げ", value="ON" if cfg.get("read_name", True) else "OFF", inline=True)
     embed.add_field(name="あいさつ", value="ON" if cfg.get("greetings", True) else "OFF", inline=True)
     embed.add_field(name="読み上げ対象",
@@ -99,6 +100,7 @@ class PanelView(discord.ui.View):
                 discord.SelectOption(label="🎧 読み上げ対象（VC参加者のみ ⇔ 全員）", value="only_vc"),
                 discord.SelectOption(label="💬 VC内チャット読み上げ ON/OFF", value="read_vc_chat"),
                 discord.SelectOption(label="🏠 常駐モード ON/OFF（退出しない・自動復帰）", value="stay_247"),
+                discord.SelectOption(label="🎵 曲名アナウンス読み上げ ON/OFF", value="announce_music"),
                 discord.SelectOption(label="📝 最大文字数を切り替え（50→100→200→300）", value="max_chars"),
                 discord.SelectOption(label="🏃 読み上げ速度を切り替え", value="rate"),
             ],
@@ -195,6 +197,9 @@ class PanelView(discord.ui.View):
         elif key == "read_vc_chat":
             cfg["read_vc_chat"] = not cfg.get("read_vc_chat", True)
             note = f"VC内チャットの読み上げを {'ON' if cfg['read_vc_chat'] else 'OFF'} にしました"
+        elif key == "announce_music":
+            cfg["announce_music"] = not cfg.get("announce_music", True)
+            note = f"曲名アナウンスの読み上げを {'ON' if cfg['announce_music'] else 'OFF'} にしました"
         elif key == "stay_247":
             cfg["stay_247"] = not cfg.get("stay_247", False)
             if cfg["stay_247"]:
