@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-commands.py — 日本語スラッシュコマンド（全19個）
+commands.py — 日本語スラッシュコマンド（全20個）
 
 再生系:      /再生 /一時停止 /再開 /スキップ /停止 /キュー /キュー削除
              /全消去 /ループ /シャッフル /音量 /フィルター /履歴
 個人機能:    /お気に入り /マイリスト
-運営系:      /パネル設置 /設定 /診断 /ヘルプ
+運営系:      /パネル設置 /設定 /診断 /音声診断 /ヘルプ
 """
 
 import time
@@ -15,7 +15,7 @@ from discord import app_commands
 from discord.ext import commands as ext_commands
 
 import store
-from core import bot, Track, COOKIE_FILE, filter_label, FILTERS
+from core import bot, Track, COOKIE_FILE, filter_label, FILTERS, FFMPEG, OPUS_LOADED
 from player import (get_player, ensure_voice, add_query, add_tracks,
                     disconnect_player, set_volume, cycle_loop, LOOP_TEXT,
                     can_control)
@@ -437,6 +437,56 @@ async def cmd_diagnose(interaction: discord.Interaction):
     await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
+@bot.tree.command(name="音声診断", description="音が出ない時に、音声まわり（libopus / DAVE暗号化）とテスト音を確認します")
+async def cmd_voice_diag(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    import importlib.metadata as md
+
+    def ver(pkg):
+        try:
+            return md.version(pkg)
+        except Exception:
+            return "未インストール"
+
+    lines = [
+        "**🔍 音声診断**",
+        f"discord.py: {ver('discord.py')}",
+        f"davey（音声の暗号化に必要）: {ver('davey')}",
+        f"PyNaCl: {ver('PyNaCl')}",
+        f"libopus（音声エンコード）: {'ロード済み' if OPUS_LOADED else '未ロード ← 音が出ない原因の本命'}",
+    ]
+    player = _player(interaction)
+    vc = player.voice
+    if not vc or not vc.is_connected():
+        lines.append("VC未接続のため、テスト音は再生できませんでした（自分が入っているVCで /再生 を1回使ってから実行して）")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        return
+    state = getattr(vc, "_connection", None)
+    dave = getattr(state, "dave_session", None) if state is not None else None
+    can = getattr(state, "can_encrypt", None) if state is not None else None
+    lines.append(f"DAVEセッション: {'あり' if dave else 'なし'} / 暗号化可: {can}")
+    if vc.is_playing() or vc.is_paused():
+        lines.append("曲の再生中だったため、テスト音は見送りました（停止してから実行するとテスト音が出ます）")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        return
+    # テスト音（880Hz・2秒）をその場で生成して再生する
+    import asyncio as _aio
+    import tempfile
+    from pathlib import Path
+    tone = Path(tempfile.gettempdir()) / "super_music_tone.wav"
+    try:
+        proc = await _aio.create_subprocess_exec(
+            FFMPEG, "-y", "-f", "lavfi", "-i", "sine=frequency=880:duration=2",
+            str(tone),
+            stdout=_aio.subprocess.DEVNULL, stderr=_aio.subprocess.DEVNULL)
+        await proc.wait()
+        vc.play(discord.FFmpegPCMAudio(str(tone), executable=FFMPEG, options="-vn"))
+        lines.append("テスト音（ピーッと2秒）を再生しました。聞こえましたか？")
+    except Exception as e:
+        lines.append(f"テスト音の再生に失敗: {e}")
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
 @bot.tree.command(name="ヘルプ", description="音楽BOTの使い方を表示します")
 async def cmd_help(interaction: discord.Interaction):
     text = (
@@ -448,7 +498,7 @@ async def cmd_help(interaction: discord.Interaction):
         "`/キュー` `/キュー削除` `/全消去` `/シャッフル` キュー管理\n"
         "`/ループ` ループ切替 ｜ `/音量` 0-200 ｜ `/フィルター` 低音ブースト等\n"
         "`/お気に入り` よく聴く曲を保存 ｜ `/マイリスト` 自分専用プレイリスト\n"
-        "`/履歴` 最近再生した曲 ｜ `/設定` サーバー設定（管理者） ｜ `/診断` 音源の状態確認（管理者）"
+        "`/履歴` 最近再生した曲 ｜ `/設定` サーバー設定（管理者） ｜ `/診断` 音源の状態確認（管理者） ｜ `/音声診断` 音が出ない時の確認"
     )
     await interaction.response.send_message(text, ephemeral=True)
 
