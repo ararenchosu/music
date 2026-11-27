@@ -243,6 +243,12 @@ class SuperMusicBot(commands.Bot):
             await restore_stay_sessions(self)
         except Exception as e:
             print(f"⚠️ 常駐VC復帰でエラー: {e}")
+        # 読み上げ連携ダッキングの監視を開始
+        try:
+            from player import start_duck_watcher
+            start_duck_watcher(self)
+        except Exception:
+            pass
 
 
 bot = SuperMusicBot()
