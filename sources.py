@@ -59,6 +59,19 @@ def _first_entry(info: dict) -> dict:
     return info
 
 
+def is_playlist_query(query: str) -> bool:
+    """入力がプレイリスト系リンクかどうか（シャッフル確認の表示判定用）。"""
+    q = query.strip()
+    if spotify_mod.COLLECTION_RE.search(q):
+        return True
+    if q.startswith(("http://", "https://")):
+        if "youtube.com" in q and "list=" in q:
+            return True
+        if "soundcloud.com" in q and "/sets/" in q:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------- 単曲の解決
 async def search_youtube(query: str, requester: str) -> Track:
     info = await ytdl_extract(f"ytsearch1:{query}")
