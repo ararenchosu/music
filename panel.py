@@ -292,6 +292,45 @@ async def update_lyrics_panel(bot: commands.Bot, player: GuildPlayer):
                             lyrics_embed(player, text), LyricsPanelView(bot))
 
 
+class LyricsCandidateView(discord.ui.View):
+    """歌詞候補の選択用（セレクトメニュー式・該当なしキャンセル付き）。"""
+
+    def __init__(self, candidates: list, on_pick):
+        super().__init__(timeout=180)
+        self.candidates = candidates
+        self.on_pick = on_pick
+        options = []
+        for i, c in enumerate(candidates):
+            label = f"{c['track']} / {c['artist']}"[:100]
+            desc_parts = []
+            if c.get("duration"):
+                d = int(c["duration"])
+                desc_parts.append(f"{d // 60}:{d % 60:02d}")
+            if c.get("album"):
+                desc_parts.append(str(c["album"]))
+            options.append(discord.SelectOption(
+                label=label, value=str(i),
+                description=(" ・ ".join(desc_parts)[:100] or None)))
+        options.append(discord.SelectOption(
+            label="該当なし・キャンセル", value="cancel", emoji="✖️",
+            description="どれも違う場合はこれ（パネルは変更しません）"))
+        sel = discord.ui.Select(
+            placeholder="表示する歌詞を選んでください",
+            options=options, custom_id="super_music:lyrics_pick")
+        sel.callback = self._picked
+        self.add_item(sel)
+
+    async def _picked(self, interaction: discord.Interaction):
+        values = (interaction.data or {}).get("values") or ["cancel"]
+        if values[0] == "cancel":
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(
+                    content="✖️ キャンセルしました（パネルは変更していません）",
+                    view=None)
+            return
+        await self.on_pick(interaction, self.candidates[int(values[0])])
+
+
 class LyricsSearchModal(discord.ui.Modal, title="歌詞を手動検索"):
     """作者＋曲名を入力して歌詞を探し、再生中の曲の歌詞として表示する。"""
 
@@ -310,16 +349,34 @@ class LyricsSearchModal(discord.ui.Modal, title="歌詞を手動検索"):
         await _safe_defer(interaction)
         artist = str(self.artist.value or "").strip()
         song = str(self.song.value or "").strip()
-        text = await lyrics_mod.search_lyrics_manual(artist, song)
-        await update_lyrics_search_panel(self.bot, interaction.guild_id,
-                                         artist, song, text)
-        if text:
-            msg = f"🎤 「{artist} / {song}」の歌詞を検索パネルに表示しました"
-        else:
-            msg = (f"🎤 「{artist} / {song}」の歌詞は見つかりませんでした。"
-                   "表記（英語/日本語・正式名）を変えて試してみてください")
+        cands = await lyrics_mod.search_lyrics_candidates(artist, song)
+        if not cands:
+            await update_lyrics_search_panel(self.bot, interaction.guild_id,
+                                             artist, song, None)
+            try:
+                await interaction.followup.send(
+                    f"🎤 「{artist} / {song}」の歌詞は見つかりませんでした。"
+                    "表記（英語/日本語・正式名）を変えて試してみてください",
+                    ephemeral=True)
+            except discord.NotFound:
+                pass
+            return
+
+        bot = self.bot
+
+        async def _pick(itx: discord.Interaction, cand: dict):
+            await update_lyrics_search_panel(
+                bot, itx.guild_id, cand["artist"], cand["track"], cand["text"])
+            if not itx.response.is_done():
+                await itx.response.edit_message(
+                    content=(f"🎤 「{cand['artist']} / {cand['track']}」の"
+                             "歌詞を検索パネルに表示しました"),
+                    view=None)
+
         try:
-            await interaction.followup.send(msg, ephemeral=True)
+            await interaction.followup.send(
+                f"🔍 {len(cands)}件見つかりました。表示する歌詞を選んでください",
+                view=LyricsCandidateView(cands, _pick), ephemeral=True)
         except discord.NotFound:
             pass
 
