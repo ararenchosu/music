@@ -482,6 +482,7 @@ async def cmd_settings(interaction: discord.Interaction):
         f"・再生開始のお知らせ: {'ON' if cfg.get('announce') else 'OFF'}",
         f"・お知らせ後にパネルを再設置: {'ON' if cfg.get('repost_panel') else 'OFF'}",
         f"・関連曲オートプレイ: {'ON' if cfg.get('autoplay') else 'OFF'}",
+        f"・お知らせをサイレントにする: {'ON' if cfg.get('silent_notify') else 'OFF'}",
     ]
     await interaction.response.send_message(
         "⚙️ **現在の設定**\n" + "\n".join(lines) + "\n\n変更する項目を選んでください",
