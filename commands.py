@@ -521,22 +521,38 @@ async def cmd_lyrics_search_panel_setup(interaction: discord.Interaction):
 @app_commands.describe(アーティスト="アーティスト名（作者）", 曲名="曲名")
 async def cmd_lyrics_search(interaction: discord.Interaction,
                             アーティスト: str, 曲名: str):
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
     import lyrics as lyrics_mod
-    text = await lyrics_mod.search_lyrics_manual(アーティスト, 曲名)
-    embed = discord.Embed(title="🎤 歌詞検索", color=0xFF6B9D)
-    embed.add_field(name="曲", value=f"{アーティスト} / {曲名}", inline=False)
-    if text:
-        embed.description = text
-        if store.panel_loc("lyrics_search_panels", interaction.guild_id):
-            from panel import update_lyrics_search_panel
-            await update_lyrics_search_panel(bot, interaction.guild_id,
-                                             アーティスト, 曲名, text)
+    from panel import LyricsCandidateView, update_lyrics_search_panel
+    cands = await lyrics_mod.search_lyrics_candidates(アーティスト, 曲名)
+    if not cands:
+        await interaction.followup.send(
+            f"🎤 「{アーティスト} / {曲名}」の歌詞は見つかりませんでした。"
+            "表記（英語/日本語・正式名）を変えて試してみてください",
+            ephemeral=True)
+        return
+
+    async def _pick(itx: discord.Interaction, cand: dict):
+        embed = discord.Embed(title="🎤 歌詞検索", color=0xFF6B9D)
+        embed.add_field(name="曲",
+                        value=f"{cand['artist']} / {cand['track']}",
+                        inline=False)
+        embed.description = cand["text"]
+        if store.panel_loc("lyrics_search_panels", itx.guild_id):
+            await update_lyrics_search_panel(
+                bot, itx.guild_id, cand["artist"], cand["track"], cand["text"])
             embed.set_footer(text="歌詞検索パネルにも反映しました")
-    else:
-        embed.description = ("歌詞は見つかりませんでした。"
-                             "表記（英語/日本語・正式名）を変えて試してみてください")
-    await interaction.followup.send(embed=embed)
+        if itx.channel is not None:
+            await itx.channel.send(embed=embed)
+        if not itx.response.is_done():
+            await itx.response.edit_message(
+                content=(f"🎤 「{cand['artist']} / {cand['track']}」の"
+                         "歌詞を表示しました"),
+                view=None)
+
+    await interaction.followup.send(
+        f"🔍 {len(cands)}件見つかりました。表示する歌詞を選んでください",
+        view=LyricsCandidateView(cands, _pick), ephemeral=True)
 
 
 @bot.tree.command(name="設定", description="サーバー設定（DJロール / 音量 / 自動退出 / 常駐 / お知らせ）")
