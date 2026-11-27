@@ -37,6 +37,7 @@ def panel_embed(guild: discord.Guild) -> discord.Embed:
     vc = guild.get_channel(cfg.get("target_vc_id") or 0)
     embed.add_field(name="対象VC", value=vc.name if vc else "自動（人がいるVC）", inline=True)
     embed.add_field(name="読み上げ", value="ON" if cfg.get("enabled", True) else "OFF", inline=True)
+    embed.add_field(name="常駐モード", value="ON" if cfg.get("stay_247") else "OFF", inline=True)
     embed.add_field(name="名前読み上げ", value="ON" if cfg.get("read_name", True) else "OFF", inline=True)
     embed.add_field(name="あいさつ", value="ON" if cfg.get("greetings", True) else "OFF", inline=True)
     embed.add_field(name="読み上げ対象",
@@ -97,6 +98,7 @@ class PanelView(discord.ui.View):
                 discord.SelectOption(label="👋 あいさつ ON/OFF", value="greetings"),
                 discord.SelectOption(label="🎧 読み上げ対象（VC参加者のみ ⇔ 全員）", value="only_vc"),
                 discord.SelectOption(label="💬 VC内チャット読み上げ ON/OFF", value="read_vc_chat"),
+                discord.SelectOption(label="🏠 常駐モード ON/OFF（退出しない・自動復帰）", value="stay_247"),
                 discord.SelectOption(label="📝 最大文字数を切り替え（50→100→200→300）", value="max_chars"),
                 discord.SelectOption(label="🏃 読み上げ速度を切り替え", value="rate"),
             ],
@@ -193,6 +195,14 @@ class PanelView(discord.ui.View):
         elif key == "read_vc_chat":
             cfg["read_vc_chat"] = not cfg.get("read_vc_chat", True)
             note = f"VC内チャットの読み上げを {'ON' if cfg['read_vc_chat'] else 'OFF'} にしました"
+        elif key == "stay_247":
+            cfg["stay_247"] = not cfg.get("stay_247", False)
+            if cfg["stay_247"]:
+                s = get_session(interaction.guild.id)
+                if s.connected():
+                    cfg["last_vc_id"] = s.voice.channel.id
+            note = (f"常駐モードを {'ON' if cfg['stay_247'] else 'OFF'} にしました"
+                    "（ONの間は人がいなくても退出せず、切断・再起動後も自動で戻ります）")
         elif key == "only_vc":
             cfg["only_vc_members"] = not cfg.get("only_vc_members", False)
             note = f"読み上げ対象を {'VC参加者のみ' if cfg['only_vc_members'] else '全員'} にしました"
