@@ -142,6 +142,7 @@ async def resolve_query(query: str, requester: str,
             raise RuntimeError("Spotifyリンクの読み取りに失敗しました")
         track, fb = await search_with_fallback(search_text, requester)
         track.source = "spotify"
+        track.origin_url = query
         return [track], ("Spotifyリンクから検索しました。" + fb)
 
     # --- Spotify プレイリスト / アルバム
@@ -209,12 +210,8 @@ async def resolve_stream_url(webpage_url: str) -> str:
     return url
 
 
-async def build_audio_source(webpage_url: str, filter_key: str = "none") -> discord.AudioSource:
-    """ストリームURL + FFmpegフィルターから再生ソースを作る（音量は付けない）。
-
-    音量は player 側で PCMVolumeTransformer を被せて制御する。
-    """
-    stream = await resolve_stream_url(webpage_url)
+def build_audio_source_from_stream(stream: str, filter_key: str = "none") -> discord.AudioSource:
+    """既に取得済みのストリームURLから再生ソースを作る（先読み用）。"""
     options = "-vn"
     af = FILTERS.get(filter_key, FILTERS["none"])["af"]
     if af:
@@ -222,6 +219,60 @@ async def build_audio_source(webpage_url: str, filter_key: str = "none") -> disc
     return discord.FFmpegPCMAudio(
         stream, executable=FFMPEG,
         before_options=FFMPEG_BEFORE_OPTS, options=options)
+
+
+async def build_audio_source(webpage_url: str, filter_key: str = "none") -> discord.AudioSource:
+    """ストリームURL + FFmpegフィルターから再生ソースを作る（音量は付けない）。
+
+    音量は player 側で PCMVolumeTransformer を被せて制御する。
+    """
+    stream = await resolve_stream_url(webpage_url)
+    return build_audio_source_from_stream(stream, filter_key)
+
+
+# ---------------------------------------------------------------- 関連曲（オートプレイ用）
+def _youtube_video_id(url: str) -> str:
+    from urllib.parse import urlparse, parse_qs
+    try:
+        q = parse_qs(urlparse(url).query)
+        if q.get("v"):
+            return q["v"][0]
+        parts = [p for p in urlparse(url).path.split("/") if p]
+        if parts:
+            return parts[-1]
+    except Exception:
+        pass
+    return ""
+
+
+async def fetch_related_tracks(track: Track, requester: str,
+                               exclude_urls: set, limit: int = 10) -> list[Track]:
+    """YouTubeミックス（RDリスト）から関連曲を取得する。
+
+    再生済み（exclude_urls）と重複は除き、最大 limit 曲まで返す。
+    SoundCloud曲など YouTube でない曲は空リスト。
+    """
+    vid = _youtube_video_id(track.webpage_url)
+    if not vid:
+        return []
+    mix_url = f"https://www.youtube.com/watch?v={vid}&list=RD{vid}"
+    try:
+        info = await ytdl_extract(mix_url, flat=True)
+    except Exception:
+        return []
+    out: list[Track] = []
+    seen = set(exclude_urls)
+    for entry in (info.get("entries") or []):
+        if not entry or not entry.get("id"):
+            continue
+        t = make_track(entry, requester, source="youtube")
+        if not t.webpage_url or t.webpage_url in seen:
+            continue
+        seen.add(t.webpage_url)
+        out.append(t)
+        if len(out) >= limit:
+            break
+    return out
 
 
 # ---------------------------------------------------------------- 診断用
