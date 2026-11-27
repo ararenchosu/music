@@ -28,6 +28,7 @@ DEFAULT_GUILD_CONFIG = {
     "alone_seconds": 60,       # BOTだけがVCに残ったら退出するまでの秒数
     "stay_247": False,         # 24時間常駐モード（自動退出を無効化）
     "announce": True,          # 再生開始通知を出すか
+    "ducking": True,           # 読み上げBOTの発話中は音楽を自動で小さくする
     "repost_panel": True,      # 再生開始通知の直後にパネルを一番下へ再設置するか
     "autoplay": False,         # キューが尽きたら関連曲を自動で流し続けるか
     "last_vc_id": None,        # 最後に接続していたVC（常駐時の自動復帰先）
