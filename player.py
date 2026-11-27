@@ -36,6 +36,14 @@ async def _repost(bot, player: "GuildPlayer"):
     await repost_panel(bot, player)
 
 
+def _send_kwargs(player: "GuildPlayer") -> dict:
+    """お知らせ送信用の追加引数。サイレント設定ONなら通知を鳴らさない。"""
+    cfg = store.guild_config(player.guild_id)
+    if cfg.get("silent_notify"):
+        return {"flags": discord.MessageFlags(suppress_notifications=True)}
+    return {}
+
+
 async def _update_sub(bot, player: "GuildPlayer", force: bool = False):
     from panel import update_sub_panel
     await update_sub_panel(bot, player, force=force)
@@ -268,7 +276,8 @@ async def play_next(bot: commands.Bot, player: GuildPlayer):
                     if channel is not None:
                         try:
                             await channel.send(
-                                f"📻 オートプレイ: 関連曲を{len(related)}曲追加しました")
+                                f"📻 オートプレイ: 関連曲を{len(related)}曲追加しました",
+                                **_send_kwargs(player))
                         except Exception:
                             pass
         track = None
@@ -328,7 +337,7 @@ async def play_next(bot: commands.Bot, player: GuildPlayer):
             channel = bot.get_channel(player.text_channel_id)
             if channel is not None:
                 try:
-                    await channel.send(f"🎵 再生中: **{track.title}**（{track.duration_text()}）")
+                    await channel.send(f"🎵 再生中: **{track.title}**（{track.duration_text()}）", **_send_kwargs(player))
                     announced = True
                 except Exception:
                     pass
@@ -431,7 +440,7 @@ async def _rejoin_job(bot: commands.Bot, player: GuildPlayer):
                 tc = bot.get_channel(player.text_channel_id)
                 if tc is not None:
                     try:
-                        await tc.send("🔁 VCから落ちたので、自動で再接続しました")
+                        await tc.send("🔁 VCから落ちたので、自動で再接続しました", **_send_kwargs(player))
                     except Exception:
                         pass
             await start_if_idle(bot, player)
@@ -477,6 +486,8 @@ async def restore_stay_sessions(bot: commands.Bot):
         if channel is None:
             continue
         player = get_player(guild_id)
+        if player.voice and player.voice.is_connected():
+            continue  # 既に接続中なら何もしない（再接続時の二重接続防止）
         player.last_voice_channel_id = channel.id
         player.text_channel_id = None
         # パネル設置チャンネルを通知先として使う（あれば）
@@ -509,7 +520,8 @@ async def restore_stay_sessions(bot: commands.Bot):
                     if tc is not None:
                         try:
                             await tc.send(
-                                f"📻 再起動から復帰: 関連曲{len(related)}曲で垂れ流しを再開します")
+                                f"📻 再起動から復帰: 関連曲{len(related)}曲で垂れ流しを再開します",
+                                **_send_kwargs(player))
                         except Exception:
                             pass
         await start_if_idle(bot, player)
@@ -621,7 +633,8 @@ async def add_query(bot: commands.Bot, player: GuildPlayer, query: str,
                 if channel is not None:
                     try:
                         await channel.send(
-                            f"✅ Spotifyプレイリスト{label}の全{added}曲を追加しました（シャッフル済み）")
+                            f"✅ Spotifyプレイリスト{label}の全{added}曲を追加しました（シャッフル済み）",
+                            **_send_kwargs(player))
                     except Exception:
                         pass
 
