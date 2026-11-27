@@ -39,6 +39,8 @@ def panel_embed(guild: discord.Guild) -> discord.Embed:
     embed.add_field(name="読み上げ", value="ON" if cfg.get("enabled", True) else "OFF", inline=True)
     embed.add_field(name="常駐モード", value="ON" if cfg.get("stay_247") else "OFF", inline=True)
     embed.add_field(name="曲名アナウンス", value="ON" if cfg.get("announce_music", True) else "OFF", inline=True)
+    _srole = guild.get_role(cfg.get("settings_role_id") or 0)
+    embed.add_field(name="設定変更ロール", value=_srole.name if _srole else "未設定（管理者のみ）", inline=True)
     embed.add_field(name="名前読み上げ", value="ON" if cfg.get("read_name", True) else "OFF", inline=True)
     embed.add_field(name="あいさつ", value="ON" if cfg.get("greetings", True) else "OFF", inline=True)
     embed.add_field(name="読み上げ対象",
@@ -54,6 +56,90 @@ def panel_embed(guild: discord.Guild) -> discord.Embed:
     embed.add_field(name="読み上げ待ち", value=f"{q}件", inline=True)
     embed.set_footer(text="設定は下のセレクトメニューから（管理者のみ変更可）")
     return embed
+
+
+def _is_settings_manager(member, cfg: dict) -> bool:
+    """危険な設定を変更できる人か（管理者/信頼ユーザー or 設定変更ロール）。"""
+    if is_privileged(member):
+        return True
+    role_id = cfg.get("settings_role_id")
+    if not role_id or member is None:
+        return False
+    return any(r.id == int(role_id) for r in getattr(member, "roles", []))
+
+
+_TEXT_ITEMS = {
+    "greet_join_text": ("入室あいさつの文章（{name}＝入った人の名前）", "{name}さんが入りました"),
+    "greet_leave_text": ("退室あいさつの文章（{name}＝出た人の名前）", "{name}さんが退出しました"),
+    "timer_text": ("タイマーの文章（{text}＝タイマーの内容）", "タイマーです。{text}"),
+    "settings_role_id": ("設定変更ロールのID（空欄で解除＝管理者のみ）", ""),
+}
+
+
+class TtsTextModal(discord.ui.Modal, title="文章・権限の設定"):
+    value = discord.ui.TextInput(label="値", required=False, max_length=200)
+
+    def __init__(self, guild_id: int, key: str):
+        super().__init__()
+        self.guild_id = guild_id
+        self.key = key
+        label, _default = _TEXT_ITEMS[key]
+        self.value.label = label[:45]
+        cfg = store.cfg(guild_id)
+        current = cfg.get(key)
+        self.value.default = str(current) if current else ""
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = store.cfg(self.guild_id)
+        if not _is_settings_manager(interaction.user, cfg):
+            await interaction.response.send_message(
+                "🔐 この設定の変更は設定変更ロール所持者か管理者のみです", ephemeral=True)
+            return
+        raw = str(self.value.value or "").strip()
+        if self.key == "settings_role_id":
+            if raw == "":
+                cfg["settings_role_id"] = None
+                msg = "🔐 設定変更ロールを解除しました（危険な設定は管理者のみ変更可）"
+            else:
+                try:
+                    rid = int(raw.strip("<@&>"))
+                except ValueError:
+                    await interaction.response.send_message(
+                        "❌ ロールIDは数字で入力してください", ephemeral=True)
+                    return
+                cfg["settings_role_id"] = rid
+                msg = f"🔐 設定変更ロールを <@&{rid}> に設定しました"
+        else:
+            cfg[self.key] = raw
+            msg = f"📝 文章を設定しました: {raw or '（空欄＝デフォルトに戻ります）'}"
+        store.save()
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+class TextMenuView(discord.ui.View):
+    """文章・権限の設定メニュー（パネルのトグルから開く）。"""
+
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        options = [
+            discord.SelectOption(label="👋 入室あいさつの文章", value="greet_join_text"),
+            discord.SelectOption(label="🚪 退室あいさつの文章", value="greet_leave_text"),
+            discord.SelectOption(label="⏰ タイマーの文章", value="timer_text"),
+            discord.SelectOption(label="🔐 設定変更ロール（ID入力）", value="settings_role_id"),
+        ]
+        select = discord.ui.Select(placeholder="📝 変更する項目を選ぶ", options=options)
+        select.callback = self._cb
+        self.add_item(select)
+
+    async def _cb(self, interaction: discord.Interaction):
+        cfg = store.cfg(interaction.guild.id)
+        if not _is_settings_manager(interaction.user, cfg):
+            await interaction.response.send_message(
+                "🔐 この設定の変更は設定変更ロール所持者か管理者のみです", ephemeral=True)
+            return
+        key = interaction.data["values"][0]
+        await interaction.response.send_modal(TtsTextModal(self.guild_id, key))
 
 
 class PanelView(discord.ui.View):
@@ -103,6 +189,7 @@ class PanelView(discord.ui.View):
                 discord.SelectOption(label="🎵 曲名アナウンス読み上げ ON/OFF", value="announce_music"),
                 discord.SelectOption(label="📝 最大文字数を切り替え（50→100→200→300）", value="max_chars"),
                 discord.SelectOption(label="🏃 読み上げ速度を切り替え", value="rate"),
+                discord.SelectOption(label="📝 文章・権限の設定（あいさつ文/タイマー文/設定変更ロール）", value="texts"),
             ],
             min_values=1, max_values=1, row=3,
         )
@@ -124,10 +211,13 @@ class PanelView(discord.ui.View):
         self.add_item(action_select)
 
     # ---- 共通（全コールバックは defer 済みの前提で followup を使う）
-    async def _gate(self, interaction: discord.Interaction) -> bool:
-        if is_privileged(interaction.user):
+    async def _gate(self, interaction: discord.Interaction, dangerous: bool = False) -> bool:
+        if not dangerous:
             return True
-        await interaction.followup.send("設定の変更は管理者のみです", ephemeral=True)
+        if _is_settings_manager(interaction.user, store.cfg(interaction.guild.id)):
+            return True
+        await interaction.followup.send(
+            "🔐 この設定の変更は設定変更ロール所持者か管理者のみです", ephemeral=True)
         return False
 
     async def _update(self, interaction: discord.Interaction, note: str):
@@ -152,7 +242,7 @@ class PanelView(discord.ui.View):
     # ---- 各セレクトのコールバック（全て defer → 権限 → 処理 → followup）
     async def _cb_channel(self, interaction: discord.Interaction):
         await self._defer(interaction)
-        if not await self._gate(interaction):
+        if not await self._gate(interaction, dangerous=True):
             return
         cfg = store.cfg(interaction.guild.id)
         resolved = interaction.data.get("resolved", {}).get("channels", {})
@@ -166,7 +256,7 @@ class PanelView(discord.ui.View):
 
     async def _cb_vc(self, interaction: discord.Interaction):
         await self._defer(interaction)
-        if not await self._gate(interaction):
+        if not await self._gate(interaction, dangerous=True):
             return
         cfg = store.cfg(interaction.guild.id)
         value = interaction.data["values"][0]
@@ -187,10 +277,15 @@ class PanelView(discord.ui.View):
 
     async def _cb_toggle(self, interaction: discord.Interaction):
         await self._defer(interaction)
-        if not await self._gate(interaction):
+        key = interaction.data["values"][0]
+        if not await self._gate(interaction, dangerous=key in ("enabled", "stay_247", "texts")):
             return
         cfg = store.cfg(interaction.guild.id)
-        key = interaction.data["values"][0]
+        if key == "texts":
+            await interaction.followup.send(
+                "📝 変更する項目を選んでください（文章は {name} や {text} が差し込まれます）",
+                view=TextMenuView(interaction.guild.id), ephemeral=True)
+            return
         if key in ("enabled", "read_name", "greetings"):
             cfg[key] = not cfg.get(key, True)
             note = f"{key} を {'ON' if cfg[key] else 'OFF'} にしました"
@@ -228,9 +323,9 @@ class PanelView(discord.ui.View):
 
     async def _cb_action(self, interaction: discord.Interaction):
         await self._defer(interaction)
-        if not await self._gate(interaction):
-            return
         action = interaction.data["values"][0]
+        if not await self._gate(interaction, dangerous=action in ("join", "leave")):
+            return
         guild = interaction.guild
         session = get_session(guild.id)
         if action == "join":
