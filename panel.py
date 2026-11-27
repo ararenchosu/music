@@ -648,6 +648,7 @@ class SettingsView(discord.ui.View):
         ("repost_panel", "お知らせ後にパネルを再設置 ON/OFF"),
         ("autoplay", "関連曲オートプレイ ON/OFF"),
         ("silent_notify", "BOTのお知らせをサイレントにする ON/OFF"),
+        ("ducking", "読み上げ中は音楽を自動で小さく ON/OFF"),
         ("autoplay_seeds", "オートプレイの種曲リスト（複数登録可）"),
     ]
 
@@ -673,6 +674,8 @@ class SettingsView(discord.ui.View):
                 desc = f"現在: {'ON' if cfg.get('autoplay') else 'OFF'}"
             elif key == "silent_notify":
                 desc = f"現在: {'ON' if cfg.get('silent_notify') else 'OFF'}"
+            elif key == "ducking":
+                desc = f"現在: {'ON' if cfg.get('ducking', True) else 'OFF'}"
             elif key == "autoplay_seeds":
                 _seeds = effective_seeds(cfg)
                 desc = f"現在: {len(_seeds)}件登録" if _seeds else "現在: 未設定（関連曲モード）"
@@ -683,7 +686,7 @@ class SettingsView(discord.ui.View):
 
     async def _on_pick(self, interaction: discord.Interaction):
         key = interaction.data["values"][0]
-        if key in ("stay_247", "announce", "repost_panel", "autoplay", "silent_notify"):
+        if key in ("stay_247", "announce", "repost_panel", "autoplay", "silent_notify", "ducking"):
             await _safe_defer(interaction)
             cfg = store.guild_config(self.guild_id)
             new_val = not cfg.get(key, False)
@@ -691,6 +694,7 @@ class SettingsView(discord.ui.View):
             label = {"stay_247": "24時間常駐モード", "announce": "再生開始のお知らせ",
                      "repost_panel": "お知らせ後にパネルを再設置",
                      "autoplay": "関連曲オートプレイ",
+                     "ducking": "読み上げ中は音楽を自動で小さく",
                      "silent_notify": "BOTのお知らせをサイレントにする"}[key]
             try:
                 await interaction.followup.send(
