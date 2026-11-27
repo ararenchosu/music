@@ -543,6 +543,7 @@ class SettingsView(discord.ui.View):
         ("announce", "再生開始のお知らせ ON/OFF"),
         ("repost_panel", "お知らせ後にパネルを再設置 ON/OFF"),
         ("autoplay", "関連曲オートプレイ ON/OFF"),
+        ("silent_notify", "BOTのお知らせをサイレントにする ON/OFF"),
     ]
 
     def __init__(self, bot: commands.Bot, guild_id: int):
@@ -565,6 +566,8 @@ class SettingsView(discord.ui.View):
                 desc = f"現在: {'ON' if cfg.get('repost_panel') else 'OFF'}"
             elif key == "autoplay":
                 desc = f"現在: {'ON' if cfg.get('autoplay') else 'OFF'}"
+            elif key == "silent_notify":
+                desc = f"現在: {'ON' if cfg.get('silent_notify') else 'OFF'}"
             options.append(discord.SelectOption(label=label, value=key, description=desc[:100]))
         select = discord.ui.Select(placeholder="変更する設定を選んでください", options=options)
         select.callback = self._on_pick
@@ -572,14 +575,15 @@ class SettingsView(discord.ui.View):
 
     async def _on_pick(self, interaction: discord.Interaction):
         key = interaction.data["values"][0]
-        if key in ("stay_247", "announce", "repost_panel", "autoplay"):
+        if key in ("stay_247", "announce", "repost_panel", "autoplay", "silent_notify"):
             await _safe_defer(interaction)
             cfg = store.guild_config(self.guild_id)
             new_val = not cfg.get(key, False)
             store.set_guild_config(self.guild_id, **{key: new_val})
             label = {"stay_247": "24時間常駐モード", "announce": "再生開始のお知らせ",
                      "repost_panel": "お知らせ後にパネルを再設置",
-                     "autoplay": "関連曲オートプレイ"}[key]
+                     "autoplay": "関連曲オートプレイ",
+                     "silent_notify": "BOTのお知らせをサイレントにする"}[key]
             try:
                 await interaction.followup.send(
                     f"⚙️ {label} を **{'ON' if new_val else 'OFF'}** にしました", ephemeral=True)
