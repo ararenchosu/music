@@ -271,6 +271,15 @@ def cancel_alone_disconnect(player: GuildPlayer):
 
 
 # ---------------------------------------------------------------- キュー追加
+async def resolve_only(query: str, requester: str,
+                       progress=None) -> tuple[list[Track], str]:
+    """入力を曲リストへ解決だけする（キューへは入れない）。
+
+    プレイリストのシャッフル確認など、追加前にユーザーへ聞きたい時に使う。
+    """
+    return await resolve_query(query, requester, progress=progress)
+
+
 async def add_query(bot: commands.Bot, player: GuildPlayer, query: str,
                     requester: str, text_channel_id: Optional[int] = None,
                     progress=None) -> tuple[list[Track], str]:
@@ -286,10 +295,14 @@ async def add_query(bot: commands.Bot, player: GuildPlayer, query: str,
 
 
 async def add_tracks(bot: commands.Bot, player: GuildPlayer, tracks: list[Track],
-                     text_channel_id: Optional[int] = None) -> None:
+                     text_channel_id: Optional[int] = None,
+                     shuffle: bool = False) -> None:
     """既に Track 化された曲（お気に入り/マイリスト等）を追加する。"""
     if text_channel_id:
         player.text_channel_id = text_channel_id
+    tracks = list(tracks)
+    if shuffle and len(tracks) > 1:
+        random.shuffle(tracks)
     for t in tracks:
         player.enqueue(t)
     await start_if_idle(bot, player)
