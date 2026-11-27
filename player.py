@@ -10,6 +10,7 @@ player.py — 再生エンジン
 
 import asyncio
 import random
+import time
 from typing import Optional
 
 import discord
@@ -17,8 +18,10 @@ from discord.ext import commands
 
 import store
 from core import Track
-from sources import (build_audio_source, resolve_query, is_playlist_query,
-                     get_spotify_collection, search_with_fallback)
+from sources import (build_audio_source, build_audio_source_from_stream,
+                     resolve_stream_url, resolve_query, is_playlist_query,
+                     get_spotify_collection, search_with_fallback,
+                     fetch_related_tracks)
 
 
 async def _redraw(bot, player: "GuildPlayer"):
@@ -31,6 +34,16 @@ async def _repost(bot, player: "GuildPlayer"):
     """パネル再設置（panel.py との循環import回避のため遅延import）。"""
     from panel import repost_panel
     await repost_panel(bot, player)
+
+
+async def _update_sub(bot, player: "GuildPlayer", force: bool = False):
+    from panel import update_sub_panel
+    await update_sub_panel(bot, player, force=force)
+
+
+async def _update_lyrics(bot, player: "GuildPlayer"):
+    from panel import update_lyrics_panel
+    await update_lyrics_panel(bot, player)
 
 
 class GuildPlayer:
@@ -48,10 +61,28 @@ class GuildPlayer:
         self.idle_task: Optional[asyncio.Task] = None
         self.alone_task: Optional[asyncio.Task] = None
         self.text_channel_id: Optional[int] = None  # 再生開始通知の送り先
+        # 再生進捗（サブパネル用）: monotonic ベースで一時停止時間を差し引く
+        self.started_at: float = 0.0
+        self.paused_since: Optional[float] = None
+        self.paused_total: float = 0.0
+        # 先読み（次の曲のストリームURLキャッシュ）とオートプレイの重複防止
+        self.prefetch: dict[str, tuple[str, float]] = {}
+        self.prefetch_pending: set[str] = set()
+        self.played_urls: set[str] = set()
+        self.sub_sig: str = ""  # サブパネルの最終表示署名（無駄な編集を避ける）
+        # VC落ち対策: 最終接続先 / 再接続タスク / 意図的な切断フラグ
+        self.last_voice_channel_id: Optional[int] = None
+        self.rejoin_task: Optional[asyncio.Task] = None
+        self.stopping: bool = False
 
     # ---- キュー操作
     def enqueue(self, track: Track) -> int:
         self.queue.append(track)
+        # 再生中の裏で次の曲を先読みしておく（失敗しても無視）
+        try:
+            schedule_prefetch(self)
+        except Exception:
+            pass
         return len(self.queue)
 
     def shuffle_queue(self) -> None:
@@ -79,6 +110,80 @@ class GuildPlayer:
         if self.idle_task and not self.idle_task.done():
             self.idle_task.cancel()
         self.idle_task = None
+
+
+# ---------------------------------------------------------------- 再生進捗・一時停止
+def elapsed_seconds(player: GuildPlayer) -> float:
+    """現在曲の再生経過秒数（一時停止中の時間は数えない）。"""
+    if player.current is None or not player.started_at:
+        return 0.0
+    now = time.monotonic()
+    elapsed = now - player.started_at - player.paused_total
+    if player.paused_since is not None:
+        elapsed -= now - player.paused_since
+    return max(0.0, elapsed)
+
+
+def progress_bar(player: GuildPlayer, blocks: int = 15) -> str:
+    """進捗バー文字列。長さ不明（ライブ等）は空バー。"""
+    cur = player.current
+    if cur is None or not cur.duration:
+        return "▱" * blocks
+    ratio = min(1.0, elapsed_seconds(player) / cur.duration)
+    filled = int(ratio * blocks)
+    return "▰" * filled + "▱" * (blocks - filled)
+
+
+def format_seconds(sec: float) -> str:
+    sec = int(max(0, sec))
+    m, s = divmod(sec, 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def pause_playback(player: GuildPlayer) -> bool:
+    if player.voice and player.voice.is_playing():
+        player.voice.pause()
+        player.paused_since = time.monotonic()
+        return True
+    return False
+
+
+def resume_playback(player: GuildPlayer) -> bool:
+    if player.voice and player.voice.is_paused():
+        if player.paused_since is not None:
+            player.paused_total += time.monotonic() - player.paused_since
+            player.paused_since = None
+        player.voice.resume()
+        return True
+    return False
+
+
+# ---------------------------------------------------------------- 先読み（次の曲）
+PREFETCH_TTL = 3600.0  # 先読みしたストリームURLの有効期限（秒）
+
+
+async def _prefetch_one(player: GuildPlayer, track: Track):
+    url = track.webpage_url
+    try:
+        stream = await resolve_stream_url(url)
+        player.prefetch[url] = (stream, time.monotonic())
+    except Exception:
+        pass
+    finally:
+        player.prefetch_pending.discard(url)
+
+
+def schedule_prefetch(player: GuildPlayer):
+    """キューの先頭曲のストリームURLを裏で先読みする（曲間無音の短縮）。"""
+    if not player.queue:
+        return
+    nxt = player.queue[0]
+    url = nxt.webpage_url
+    if not url or url in player.prefetch or url in player.prefetch_pending:
+        return
+    player.prefetch_pending.add(url)
+    asyncio.create_task(_prefetch_one(player, nxt))
 
 
 PLAYERS: dict[int, GuildPlayer] = {}
@@ -118,6 +223,12 @@ async def ensure_voice(player: GuildPlayer, member: discord.Member) -> discord.V
     if member.voice is None or member.voice.channel is None:
         raise commands.CommandError("先にボイスチャンネルへ入ってください。")
     channel = member.voice.channel
+    player.stopping = False
+    player.last_voice_channel_id = channel.id
+    try:
+        store.set_guild_config(player.guild_id, last_vc_id=channel.id)
+    except Exception:
+        pass
     if player.voice and player.voice.is_connected():
         if player.voice.channel.id != channel.id:
             await player.voice.move_to(channel)
@@ -130,51 +241,104 @@ async def ensure_voice(player: GuildPlayer, member: discord.Member) -> discord.V
 
 # ---------------------------------------------------------------- 再生
 async def play_next(bot: commands.Bot, player: GuildPlayer):
+    # 再生開始の全行程をロックする。ロックが無いと、逐次追加タスクと
+    # 曲終了コールバックが同時にここへ入って二重に voice.play() を呼び、
+    # 'Already playing audio.' で落ちる（2026-11-27 実発生）。
     async with player.lock:
         if player.voice is None or not player.voice.is_connected():
             player.current = None
             return
-        if not player.queue:
+        if player.voice.is_playing() or player.voice.is_paused():
+            return  # 既に再生中なら二重起動しない
+        cfg = store.guild_config(player.guild_id)
+        # --- オートプレイ: キューが尽きたら関連曲を補充して流し続ける
+        if not player.queue and cfg.get("autoplay") and player.current is not None:
+            seed = player.current
+            related = []
+            try:
+                related = await fetch_related_tracks(
+                    seed, seed.requester, player.played_urls, limit=10)
+            except Exception:
+                related = []
+            if related:
+                for t in related:
+                    player.enqueue(t)
+                if player.text_channel_id:
+                    channel = bot.get_channel(player.text_channel_id)
+                    if channel is not None:
+                        try:
+                            await channel.send(
+                                f"📻 オートプレイ: 関連曲を{len(related)}曲追加しました")
+                        except Exception:
+                            pass
+        track = None
+        while player.queue:
+            track = player.queue.pop(0)
+            player.current = track
+            try:
+                cached = player.prefetch.get(track.webpage_url)
+                if cached and time.monotonic() - cached[1] < PREFETCH_TTL:
+                    raw = build_audio_source_from_stream(cached[0], player.filter_key)
+                else:
+                    raw = await build_audio_source(track.webpage_url, player.filter_key)
+            except Exception as e:
+                print(f"⚠️ 再生ソース生成に失敗 ({track.title}): {e}")
+                player.current = None
+                track = None
+                continue
+            break
+        if track is None:
             player.current = None
+            player.started_at = 0.0
+            player.paused_since = None
+            player.paused_total = 0.0
             schedule_idle_disconnect(bot, player)
             await _redraw(bot, player)
+            await _update_sub(bot, player, force=True)
             return
-        track = player.queue.pop(0)
-        player.current = track
-    try:
-        raw = await build_audio_source(track.webpage_url, player.filter_key)
-    except Exception as e:
-        print(f"⚠️ 再生ソース生成に失敗 ({track.title}): {e}")
-        await play_next(bot, player)
-        return
-    if player.voice is None or not player.voice.is_connected():
-        return
-    if not _can_encrypt(player.voice):
-        await _wait_encrypt_ready(player.voice, timeout=5.0)
-    source = discord.PCMVolumeTransformer(raw, volume=player.volume / 100.0)
+        if player.voice is None or not player.voice.is_connected():
+            player.current = None
+            return
+        if not _can_encrypt(player.voice):
+            await _wait_encrypt_ready(player.voice, timeout=5.0)
+        source = discord.PCMVolumeTransformer(raw, volume=player.volume / 100.0)
 
-    def _after(err, _bot=bot, _player=player):
-        if err:
-            print(f"⚠️ 再生エラー: {err}")
-        asyncio.run_coroutine_threadsafe(advance(_bot, _player), _bot.loop)
+        def _after(err, _bot=bot, _player=player):
+            if err:
+                print(f"⚠️ 再生エラー: {err}")
+            asyncio.run_coroutine_threadsafe(advance(_bot, _player), _bot.loop)
 
-    player.voice.play(source, after=_after)
-    store.push_history(player.guild_id, track.to_dict())
-    cfg = store.guild_config(player.guild_id)
-    announced = False
-    if cfg.get("announce", True) and player.text_channel_id:
-        channel = bot.get_channel(player.text_channel_id)
-        if channel is not None:
-            try:
-                await channel.send(f"🎵 再生中: **{track.title}**（{track.duration_text()}）")
-                announced = True
-            except Exception:
-                pass
-    if announced and cfg.get("repost_panel", True):
-        # お知らせの直後にパネルを一番下へ置き直す（流れて埋もれないように）
-        await _repost(bot, player)
-    else:
-        await _redraw(bot, player)
+        try:
+            player.voice.play(source, after=_after)
+        except discord.ClientException as e:
+            # 万一競合したら曲をキューの先頭へ戻して何もなかったことにする
+            print(f"⚠️ 再生開始が競合しました（{e}）。曲をキューへ戻します。")
+            player.current = None
+            player.queue.insert(0, track)
+            return
+        # 再生開始: 進捗計測と先読みを開始し、サブ/歌詞パネルを更新する
+        player.started_at = time.monotonic()
+        player.paused_since = None
+        player.paused_total = 0.0
+        player.played_urls.add(track.webpage_url)
+        schedule_prefetch(player)
+        store.push_history(player.guild_id, track.to_dict())
+        announced = False
+        if cfg.get("announce", True) and player.text_channel_id:
+            channel = bot.get_channel(player.text_channel_id)
+            if channel is not None:
+                try:
+                    await channel.send(f"🎵 再生中: **{track.title}**（{track.duration_text()}）")
+                    announced = True
+                except Exception:
+                    pass
+        if announced and cfg.get("repost_panel", True):
+            # お知らせの直後にパネルを一番下へ置き直す（流れて埋もれないように）
+            await _repost(bot, player)
+        else:
+            await _redraw(bot, player)
+        await _update_sub(bot, player, force=True)
+        await _update_lyrics(bot, player)
 
 
 async def advance(bot: commands.Bot, player: GuildPlayer):
@@ -190,7 +354,8 @@ async def start_if_idle(bot: commands.Bot, player: GuildPlayer):
     """止まっていれば再生を開始し、アイドルタイマーを解除する。"""
     player.cancel_idle()
     if player.voice and player.voice.is_connected() \
-            and not player.voice.is_playing() and not player.voice.is_paused():
+            and not player.voice.is_playing() and not player.voice.is_paused() \
+            and not player.lock.locked():
         await play_next(bot, player)
 
 
@@ -218,14 +383,136 @@ LOOP_TEXT = {"off": "オフ", "track": "この曲をループ", "queue": "キュ
 
 # ---------------------------------------------------------------- 切断 / 自動退出
 async def disconnect_player(bot: commands.Bot, player: GuildPlayer):
+    player.stopping = True  # 意図的な切断（VC落ち自動復帰の対象外）
+    if player.rejoin_task and not player.rejoin_task.done():
+        player.rejoin_task.cancel()
+    player.rejoin_task = None
     player.session += 1
     player.cancel_timers()
     player.queue.clear()
     player.current = None
+    player.started_at = 0.0
+    player.paused_since = None
+    player.paused_total = 0.0
+    player.prefetch.clear()
+    player.played_urls.clear()
     if player.voice and player.voice.is_connected():
         await player.voice.disconnect(force=True)
     player.voice = None
     await _redraw(bot, player)
+    await _update_sub(bot, player, force=True)
+    await _update_lyrics(bot, player)
+
+
+# ---------------------------------------------------------------- VC落ち対策（自動復帰）
+async def _rejoin_job(bot: commands.Bot, player: GuildPlayer):
+    """落ちたVCへ自動で戻り、再生を再開する。最大約10分リトライする。"""
+    await asyncio.sleep(8)
+    for _ in range(40):
+        if player.stopping:
+            return
+        cfg = store.guild_config(player.guild_id)
+        if not cfg.get("stay_247"):
+            return
+        if player.voice and player.voice.is_connected():
+            return
+        guild = bot.get_guild(player.guild_id)
+        if guild is None:
+            return
+        channel_id = player.last_voice_channel_id or cfg.get("last_vc_id")
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if channel is None:
+            return
+        try:
+            player.voice = await channel.connect(self_deaf=True)
+            await _wait_encrypt_ready(player.voice)
+            print(f"🔁 VCへ自動再接続しました (guild {player.guild_id})")
+            if player.text_channel_id:
+                tc = bot.get_channel(player.text_channel_id)
+                if tc is not None:
+                    try:
+                        await tc.send("🔁 VCから落ちたので、自動で再接続しました")
+                    except Exception:
+                        pass
+            await start_if_idle(bot, player)
+            return
+        except Exception as e:
+            print(f"⚠️ VC再接続に失敗（リトライします）: {e}")
+            player.voice = None
+            await asyncio.sleep(15)
+
+
+def handle_bot_voice_drop(bot: commands.Bot, player: GuildPlayer):
+    """BOT自身が意図せずVCから落ちた時の処理（常駐ON時のみ自動復帰）。"""
+    if player.stopping:
+        return
+    cfg = store.guild_config(player.guild_id)
+    # 中断された曲はキューの先頭へ戻して、再接続後に最初から再生する
+    if player.current is not None:
+        player.queue.insert(0, player.current)
+        player.current = None
+    player.started_at = 0.0
+    player.paused_since = None
+    player.paused_total = 0.0
+    player.voice = None
+    if not cfg.get("stay_247"):
+        return
+    if player.rejoin_task is None or player.rejoin_task.done():
+        player.rejoin_task = asyncio.create_task(_rejoin_job(bot, player))
+
+
+async def restore_stay_sessions(bot: commands.Bot):
+    """起動時: 常駐ONのサーバーは前回のVCへ自動で戻る。
+
+    オートプレイもONなら、最後に再生した曲の関連曲から垂れ流しを再開する。
+    """
+    for gid, cfg in list(store.data()["guilds"].items()):
+        if not cfg.get("stay_247") or not cfg.get("last_vc_id"):
+            continue
+        guild_id = int(gid)
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            continue
+        channel = guild.get_channel(int(cfg["last_vc_id"]))
+        if channel is None:
+            continue
+        player = get_player(guild_id)
+        player.last_voice_channel_id = channel.id
+        player.text_channel_id = None
+        # パネル設置チャンネルを通知先として使う（あれば）
+        for kind in ("panels", "sub_panels", "lyrics_panels"):
+            loc = store.panel_loc(kind, guild_id)
+            if loc:
+                player.text_channel_id = loc["channel"]
+                break
+        try:
+            player.voice = await channel.connect(self_deaf=True)
+            await _wait_encrypt_ready(player.voice)
+            print(f"🔁 起動時: 常駐VCへ復帰しました (guild {guild_id})")
+        except Exception as e:
+            print(f"⚠️ 起動時のVC復帰に失敗 (guild {guild_id}): {e}")
+            player.voice = None
+            continue
+        if cfg.get("autoplay") and not player.queue:
+            hist = store.history(guild_id, 1)
+            if hist:
+                seed = Track.from_dict(hist[0], requester="オートプレイ")
+                try:
+                    related = await fetch_related_tracks(
+                        seed, "オートプレイ", set(), limit=10)
+                except Exception:
+                    related = []
+                for t in related:
+                    player.enqueue(t)
+                if related and player.text_channel_id:
+                    tc = bot.get_channel(player.text_channel_id)
+                    if tc is not None:
+                        try:
+                            await tc.send(
+                                f"📻 再起動から復帰: 関連曲{len(related)}曲で垂れ流しを再開します")
+                        except Exception:
+                            pass
+        await start_if_idle(bot, player)
 
 
 def schedule_idle_disconnect(bot: commands.Bot, player: GuildPlayer):
@@ -319,7 +606,11 @@ async def add_query(bot: commands.Bot, player: GuildPlayer, query: str,
                     continue
                 player.enqueue(track)
                 added += 1
-                await start_if_idle(bot, player)
+                try:
+                    await start_if_idle(bot, player)
+                except Exception as e:
+                    # 1回の再生開始失敗で残り全曲の追加が止まらないようにする
+                    print(f"⚠️ 逐次追加中の再生開始に失敗（続行します）: {e}")
                 if added % 10 == 0:
                     await _redraw(bot, player)
             if player.session != session:
