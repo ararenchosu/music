@@ -431,7 +431,8 @@ def lyrics_search_embed(guild_id: int) -> discord.Embed:
     if state is None:
         embed.description = (
             "下のボタンからアーティスト名と曲名を入力すると、歌詞を表示します。\n"
-            "このパネルは自動では変わりません（検索した時だけ更新されます）。")
+            "このパネルは自動では変わりません（検索した時だけ更新されます）。\n"
+            "表示した歌詞は5分経つと自動でこの初期表示に戻ります。")
         return embed
     artist, song, text = state
     embed.add_field(name="曲", value=f"{artist} / {song}", inline=False)
@@ -442,6 +443,30 @@ def lyrics_search_embed(guild_id: int) -> discord.Embed:
     return embed
 
 
+LYRICS_SEARCH_RESET_SECONDS = 300
+_lyrics_search_reset_tasks: dict[int, asyncio.Task] = {}
+
+
+def _schedule_search_reset(bot: commands.Bot, guild_id: int):
+    """表示から5分後に、検索パネルを初期表示へ戻すタイマーを張り直す。"""
+    old_task = _lyrics_search_reset_tasks.get(guild_id)
+    if old_task is not None and not old_task.done():
+        old_task.cancel()
+
+    async def _reset():
+        try:
+            await asyncio.sleep(LYRICS_SEARCH_RESET_SECONDS)
+        except asyncio.CancelledError:
+            return
+        _lyrics_search_state.pop(guild_id, None)
+        await _edit_typed_panel(bot, "lyrics_search_panels",
+                                get_player(guild_id),
+                                lyrics_search_embed(guild_id),
+                                LyricsSearchPanelView(bot))
+
+    _lyrics_search_reset_tasks[guild_id] = asyncio.create_task(_reset())
+
+
 async def update_lyrics_search_panel(bot: commands.Bot, guild_id: int,
                                      artist: str, song: str,
                                      text: Optional[str]):
@@ -449,6 +474,7 @@ async def update_lyrics_search_panel(bot: commands.Bot, guild_id: int,
     await _edit_typed_panel(bot, "lyrics_search_panels", get_player(guild_id),
                             lyrics_search_embed(guild_id),
                             LyricsSearchPanelView(bot))
+    _schedule_search_reset(bot, guild_id)
 
 
 class LyricsSearchPanelView(discord.ui.View):
@@ -492,14 +518,7 @@ class LyricsSearchPanelView(discord.ui.View):
                          if c["track"] == song and c["artist"] == artist),
                         cands[0])
             artist, song, new_text = pick["artist"], pick["track"], pick["text"]
-        _lyrics_search_state[gid] = (artist, song, new_text)
-        if interaction.message is not None:
-            try:
-                await interaction.message.edit(
-                    embed=lyrics_search_embed(gid),
-                    view=LyricsSearchPanelView(self.bot))
-            except discord.NotFound:
-                pass
+        await update_lyrics_search_panel(self.bot, gid, artist, song, new_text)
 
 
 # ---------------------------------------------------------------- 汎用: 安全な defer
