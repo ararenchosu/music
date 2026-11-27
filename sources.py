@@ -59,6 +59,18 @@ def _first_entry(info: dict) -> dict:
     return info
 
 
+async def get_spotify_collection(query: str):
+    """Spotifyプレイリスト/アルバムなら (名前, [検索語...])、違うなら None を返す。
+
+    曲の解決はしない（検索語リストだけ返す）ので高速。
+    1曲ずつの解決は player 側のバックグラウンド処理で行う。
+    """
+    if not spotify_mod.COLLECTION_RE.search(query):
+        return None
+    name, queries = await spotify_mod.resolve_collection_queries(query)
+    return name, queries
+
+
 def is_playlist_query(query: str) -> bool:
     """入力がプレイリスト系リンクかどうか（シャッフル確認の表示判定用）。"""
     q = query.strip()
