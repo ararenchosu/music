@@ -32,6 +32,7 @@ DEFAULT_GUILD_CONFIG = {
     "autoplay": False,         # キューが尽きたら関連曲を自動で流し続けるか
     "last_vc_id": None,        # 最後に接続していたVC（常駐時の自動復帰先）
     "silent_notify": False,    # BOTのお知らせを通知なし（サイレント）で送るか
+    "autoplay_seed": "",       # オートプレイの種曲（空欄＝最後に再生した曲ベース）
 }
 
 HISTORY_LIMIT = 50
