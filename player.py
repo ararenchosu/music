@@ -421,6 +421,37 @@ def start_duck_watcher(bot: commands.Bot):
         _duck_task = asyncio.create_task(_duck_watcher(bot))
 
 
+# ---------------------------------------------------------------- 曲名アナウンス連携
+# 曲が始まったら共有ファイルに「次はこの曲」と書いておき、
+# 読み上げBOTがそれを拾ってVCで読み上げる。
+_ANNOUNCE_FILES = [BASE_DIR / "tts_announce.json",
+                   BASE_DIR.parent / "tts_announce.json"]
+
+
+def _write_announce(player: GuildPlayer, track: Track):
+    import json as _json
+    title = (track.title or "").strip()
+    if len(title) > 80:
+        title = title[:80]
+    payload = {
+        "id": f"{player.guild_id}-{player.play_count}-{int(time.time())}",
+        "guild_id": player.guild_id,
+        "text": f"次は、{title} です",
+        "ts": time.time(),
+    }
+    written: set[str] = set()
+    for path in _ANNOUNCE_FILES:
+        key = str(path)
+        if key in written:
+            continue
+        written.add(key)
+        try:
+            path.write_text(_json.dumps(payload, ensure_ascii=False),
+                            encoding="utf-8")
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------- DAVE暗号化の準備待ち
 def _can_encrypt(vc) -> bool:
     state = getattr(vc, "_connection", None) if vc else None
@@ -536,6 +567,9 @@ async def play_next(bot: commands.Bot, player: GuildPlayer):
         if cfg.get("autoplay") and len(player.queue) <= AUTOPLAY_LOW \
                 and not player.refilling:
             asyncio.create_task(_autoplay_refill_bg(bot, player))
+        # 曲名アナウンス: 読み上げBOTへ「次はこの曲」と伝える
+        if cfg.get("announce_tts", True):
+            _write_announce(player, track)
         store.push_history(player.guild_id, track.to_dict())
         announced = False
         if cfg.get("announce", True) and player.text_channel_id:
