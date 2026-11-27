@@ -161,6 +161,8 @@ class Track:
     duration: Optional[int] = None
     requester: str = ""
     source: str = "youtube"   # youtube / soundcloud / spotify(解決元)
+    thumbnail: Optional[str] = None   # サムネイル画像URL（サブパネル表示用）
+    origin_url: str = ""              # 入力元のURL（Spotify曲リンク等）
 
     def duration_text(self) -> str:
         if not self.duration:
@@ -171,7 +173,8 @@ class Track:
 
     def to_dict(self) -> dict:
         return {"title": self.title, "webpage_url": self.webpage_url,
-                "duration": self.duration, "source": self.source}
+                "duration": self.duration, "source": self.source,
+                "thumbnail": self.thumbnail, "origin_url": self.origin_url}
 
     @staticmethod
     def from_dict(d: dict, requester: str = "") -> "Track":
@@ -179,7 +182,9 @@ class Track:
                      webpage_url=d.get("webpage_url") or "",
                      duration=d.get("duration"),
                      requester=requester,
-                     source=d.get("source") or "youtube")
+                     source=d.get("source") or "youtube",
+                     thumbnail=d.get("thumbnail"),
+                     origin_url=d.get("origin_url") or "")
 
 
 def make_track(info: dict, requester: str, source: str = "youtube") -> Track:
@@ -187,11 +192,20 @@ def make_track(info: dict, requester: str, source: str = "youtube") -> Track:
     url = info.get("webpage_url") or ""
     if not url and vid and source == "youtube":
         url = f"https://www.youtube.com/watch?v={vid}"
+    thumb = info.get("thumbnail")
+    if not thumb and info.get("thumbnails"):
+        try:
+            thumb = info["thumbnails"][-1].get("url")
+        except Exception:
+            thumb = None
+    if not thumb and vid and source == "youtube":
+        thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
     return Track(title=info.get("title") or "（タイトル不明）",
                  webpage_url=url,
                  duration=info.get("duration"),
                  requester=requester,
-                 source=source)
+                 source=source,
+                 thumbnail=thumb)
 
 
 # ---------------------------------------------------------------- BOT 本体
@@ -205,9 +219,11 @@ class SuperMusicBot(commands.Bot):
     async def setup_hook(self):
         # import はここで遅延（panel -> player -> core の循環を避ける）
         import store
-        from panel import MusicPanelView
+        from panel import MusicPanelView, SubPanelView, LyricsPanelView
         store.load_data()
         self.add_view(MusicPanelView(self))
+        self.add_view(SubPanelView(self))
+        self.add_view(LyricsPanelView(self))
         await self.tree.sync()
 
     async def on_ready(self):
@@ -221,6 +237,12 @@ class SuperMusicBot(commands.Bot):
         # 設置済みパネルを最新の見た目に自動再描画する
         from panel import redraw_all_panels
         await redraw_all_panels(self)
+        # 常駐ONのサーバーは前回のVCへ自動復帰する（垂れ流し継続）
+        try:
+            from player import restore_stay_sessions
+            await restore_stay_sessions(self)
+        except Exception as e:
+            print(f"⚠️ 常駐VC復帰でエラー: {e}")
 
 
 bot = SuperMusicBot()
