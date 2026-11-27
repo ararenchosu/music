@@ -505,6 +505,40 @@ async def cmd_lyricspanel_setup(interaction: discord.Interaction):
         await update_lyrics_panel(bot, player)
 
 
+@bot.tree.command(name="歌詞検索パネル設置", description="手動専用の歌詞検索パネルをこのチャンネルに設置します（自動更新なし）")
+@app_commands.default_permissions(administrator=True)
+async def cmd_lyrics_search_panel_setup(interaction: discord.Interaction):
+    from panel import lyrics_search_embed, LyricsSearchPanelView
+    await interaction.response.send_message(
+        embed=lyrics_search_embed(interaction.guild_id),
+        view=LyricsSearchPanelView(bot))
+    message = await interaction.original_response()
+    store.save_panel_loc("lyrics_search_panels", interaction.guild_id,
+                         interaction.channel_id, message.id)
+
+
+@bot.tree.command(name="歌詞検索", description="アーティスト名と曲名を指定して歌詞を検索します")
+@app_commands.describe(アーティスト="アーティスト名（作者）", 曲名="曲名")
+async def cmd_lyrics_search(interaction: discord.Interaction,
+                            アーティスト: str, 曲名: str):
+    await interaction.response.defer()
+    import lyrics as lyrics_mod
+    text = await lyrics_mod.search_lyrics_manual(アーティスト, 曲名)
+    embed = discord.Embed(title="🎤 歌詞検索", color=0xFF6B9D)
+    embed.add_field(name="曲", value=f"{アーティスト} / {曲名}", inline=False)
+    if text:
+        embed.description = text
+        if store.panel_loc("lyrics_search_panels", interaction.guild_id):
+            from panel import update_lyrics_search_panel
+            await update_lyrics_search_panel(bot, interaction.guild_id,
+                                             アーティスト, 曲名, text)
+            embed.set_footer(text="歌詞検索パネルにも反映しました")
+    else:
+        embed.description = ("歌詞は見つかりませんでした。"
+                             "表記（英語/日本語・正式名）を変えて試してみてください")
+    await interaction.followup.send(embed=embed)
+
+
 @bot.tree.command(name="設定", description="サーバー設定（DJロール / 音量 / 自動退出 / 常駐 / お知らせ）")
 @app_commands.default_permissions(administrator=True)
 async def cmd_settings(interaction: discord.Interaction):
@@ -620,6 +654,8 @@ async def cmd_help(interaction: discord.Interaction):
         "`/パネル設置` セレクト1つで操作できる常設パネルを設置\n"
         "`/サブパネル設置` 再生中の曲（画像・進捗・リンク）パネルを設置\n"
         "`/歌詞パネル設置` 再生中の曲の歌詞パネルを設置\n"
+        "`/歌詞検索 <アーティスト> <曲名>` 作者と曲名を指定して歌詞を検索\n"
+        "`/歌詞検索パネル設置` 手動専用の歌詞検索パネルを設置（自動更新なし）\n"
         "パネルの「📻 オートプレイ切替」で、キューが尽きた時に関連曲を自動再生\n"
         "`/一時停止` `/再開` `/スキップ` `/停止` 再生コントロール\n"
         "`/キュー` `/キュー削除` `/全消去` `/シャッフル` キュー管理\n"
