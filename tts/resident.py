@@ -235,10 +235,12 @@ async def on_voice_state_update(member: discord.Member, before, after):
         left = (before.channel is not None and before.channel.id == bot_channel.id
                 and (after.channel is None or after.channel.id != bot_channel.id))
         if joined:
-            await enqueue(session, f"{member.display_name}さんが入りました",
+            tmpl = cfg.get("greet_join_text") or "{name}さんが入りました"
+            await enqueue(session, tmpl.replace("{name}", member.display_name),
                           cfg.get("default_voice", DEFAULT_VOICE), cfg.get("rate", "+0%"))
         elif left:
-            await enqueue(session, f"{member.display_name}さんが退出しました",
+            tmpl = cfg.get("greet_leave_text") or "{name}さんが退出しました"
+            await enqueue(session, tmpl.replace("{name}", member.display_name),
                           cfg.get("default_voice", DEFAULT_VOICE), cfg.get("rate", "+0%"))
 
     if not member.bot:
