@@ -112,22 +112,29 @@ def set_guild_config(guild_id: int, **kwargs) -> dict:
 
 
 # ---------------------------------------------------------------- パネル設置場所
+def _kind_map(kind: str) -> dict:
+    """パネル種別ごとの辞書を返す（未知の種別は自動で作る）。"""
+    if not isinstance(_data.get(kind), dict):
+        _data[kind] = {}
+    return _data[kind]
+
+
 def save_panel_loc(kind: str, guild_id: int, channel_id: int, message_id: int) -> None:
-    """kind: panels / sub_panels / lyrics_panels"""
-    _data[kind][str(guild_id)] = {"channel": channel_id, "message": message_id}
+    """kind: panels / sub_panels / lyrics_panels / lyrics_search_panels"""
+    _kind_map(kind)[str(guild_id)] = {"channel": channel_id, "message": message_id}
     save_data()
 
 
 def panel_loc(kind: str, guild_id: int) -> dict | None:
-    return _data[kind].get(str(guild_id))
+    return _kind_map(kind).get(str(guild_id))
 
 
 def all_panel_locs(kind: str) -> dict:
-    return dict(_data[kind])
+    return dict(_kind_map(kind))
 
 
 def drop_panel_loc(kind: str, guild_id: int) -> None:
-    _data[kind].pop(str(guild_id), None)
+    _kind_map(kind).pop(str(guild_id), None)
     save_data()
 
 
