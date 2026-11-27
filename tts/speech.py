@@ -259,7 +259,10 @@ async def _worker(session: Session):
             def _after(_err=None):
                 loop.call_soon_threadsafe(done.set)
 
-            source = discord.FFmpegPCMAudio(str(path), options="-vn")
+            _cfg = store.cfg(session.guild_id)
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(str(path), options="-vn"),
+                volume=max(0.0, min(2.0, int(_cfg.get("volume", 100)) / 100.0)))
             _set_duck(20)   # 音楽BOT側の音量を下げてもらう
             session.voice.play(source, after=_after)
             try:
