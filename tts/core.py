@@ -48,6 +48,8 @@ QUEUE_MAX = 20           # 読み上げキューの上限（超過分は捨て�
 DEFAULT_CONFIG = {
     "read_channel_id": None,     # 読み上げるテキストチャンネル
     "target_vc_id": None,        # None = 自動（人がいるVC） / ID = そのVC固定
+    "stay_247": False,           # 常駐モード: 人がいなくても退出せず、切断・再起動後も自動復帰
+    "last_vc_id": None,          # 最後に接続したVC（常駐モードの復帰先）
     "enabled": True,             # 読み上げ ON/OFF
     "read_name": True,           # 発言者名を読む
     "greetings": True,           # 入退室あいさつ
