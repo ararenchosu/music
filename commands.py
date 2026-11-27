@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-commands.py — 日本語スラッシュコマンド（全20個）
+commands.py — 日本語スラッシュコマンド（全21個）
 
 再生系:      /再生 /一時停止 /再開 /スキップ /停止 /キュー /キュー削除
              /全消去 /ループ /シャッフル /音量 /フィルター /履歴
 個人機能:    /お気に入り /マイリスト
-運営系:      /パネル設置 /設定 /診断 /音声診断 /ヘルプ
+運営系:      /接続 /パネル設置 /設定 /診断 /音声診断 /ヘルプ
 """
 
 import time
@@ -18,7 +18,7 @@ import store
 from core import bot, Track, COOKIE_FILE, filter_label, FILTERS, FFMPEG, OPUS_LOADED
 from player import (get_player, ensure_voice, add_query, add_tracks,
                     disconnect_player, set_volume, cycle_loop, LOOP_TEXT,
-                    can_control)
+                    can_control, _wait_encrypt_ready, _can_encrypt)
 from panel import (MusicPanelView, panel_embed, queue_embed,
                    FilterView, VolumeView, QueueRemoveView, SettingsView,
                    TrackPickView, NamePickView)
@@ -377,6 +377,57 @@ async def cmd_mylist(interaction: discord.Interaction, 操作: str, 名前: str 
 
 
 # ---------------------------------------------------------------- 運営系
+class VoiceChannelPickView(discord.ui.View):
+    """BOTだけを先にVCへ入れるためのチャンネル選択（/接続 用・一時的View）。"""
+
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=60)
+        options = [discord.SelectOption(label=ch.name[:100], value=str(ch.id))
+                   for ch in guild.voice_channels[:25]]
+        select = discord.ui.Select(
+            placeholder="BOTを入れるボイスチャンネルを選んでください",
+            options=options, custom_id="super_music:vc_pick")
+        select.callback = self._on_pick
+        self.add_item(select)
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        select = self.children[0]
+        channel_id = int(select.values[0])
+        channel = interaction.guild.get_channel(channel_id)
+        player = get_player(interaction.guild_id)
+        try:
+            if player.voice and player.voice.is_connected():
+                if player.voice.channel.id != channel_id:
+                    await player.voice.move_to(channel)
+            else:
+                player.voice = await channel.connect(self_deaf=True)
+            ok = await _wait_encrypt_ready(player.voice)
+            text = (f"🔊 **{channel.name}** にBOTが入りました。"
+                    f"暗号化準備: {'✅ OK' if ok else '⏱ タイムアウト（まだ暗号化可になっていません）'}\n"
+                    "次に、あなたが同じVCへ入ってください。その後 /再生 で曲をかけてください。")
+        except Exception as e:
+            text = f"❌ 接続に失敗しました: {e}"
+        select.disabled = True
+        try:
+            await interaction.edit_original_response(content=text, view=self)
+        except discord.NotFound:
+            pass
+
+
+@bot.tree.command(name="接続", description="BOTだけを先にボイスチャンネルへ入れます（暗号化の順番テスト用）")
+async def cmd_connect_first(interaction: discord.Interaction):
+    if not await _require_control(interaction):
+        return
+    if not interaction.guild.voice_channels:
+        await interaction.response.send_message("ボイスチャンネルがありません", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        "BOTを先に入れるチャンネルを選んでください（あなたはまだ入らないでください）",
+        view=VoiceChannelPickView(interaction.guild), ephemeral=True)
+
+
 @bot.tree.command(name="パネル設置", description="常設の音楽パネルをこのチャンネルに設置します")
 @app_commands.default_permissions(administrator=True)
 async def cmd_panel_setup(interaction: discord.Interaction):
@@ -498,7 +549,7 @@ async def cmd_help(interaction: discord.Interaction):
         "`/キュー` `/キュー削除` `/全消去` `/シャッフル` キュー管理\n"
         "`/ループ` ループ切替 ｜ `/音量` 0-200 ｜ `/フィルター` 低音ブースト等\n"
         "`/お気に入り` よく聴く曲を保存 ｜ `/マイリスト` 自分専用プレイリスト\n"
-        "`/履歴` 最近再生した曲 ｜ `/設定` サーバー設定（管理者） ｜ `/診断` 音源の状態確認（管理者） ｜ `/音声診断` 音が出ない時の確認"
+        "`/履歴` 最近再生した曲 ｜ `/設定` サーバー設定（管理者） ｜ `/診断` 音源の状態確認（管理者） ｜ `/音声診断` 音が出ない時の確認 ｜ `/接続` BOTだけ先にVCへ入れる"
     )
     await interaction.response.send_message(text, ephemeral=True)
 
