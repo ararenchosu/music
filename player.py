@@ -433,10 +433,15 @@ def _write_announce(player: GuildPlayer, track: Track):
     title = (track.title or "").strip()
     if len(title) > 80:
         title = title[:80]
+    cfg = store.guild_config(player.guild_id)
+    template = cfg.get("announce_text") or "次は、{title} です"
+    text = template.replace("{title}", title)
+    if "{title}" not in template:
+        text = f"{template} {title}"
     payload = {
         "id": f"{player.guild_id}-{player.play_count}-{int(time.time())}",
         "guild_id": player.guild_id,
-        "text": f"次は、{title} です",
+        "text": text,
         "ts": time.time(),
     }
     written: set[str] = set()
@@ -1014,3 +1019,29 @@ def can_control(interaction: discord.Interaction) -> bool:
     if not role_id:
         return True
     return any(r.id == int(role_id) for r in interaction.user.roles)
+
+
+# 全員に触られると困る設定（設定変更ロール or 管理者のみ変更可）
+DANGEROUS_SETTING_KEYS = {
+    "dj_role_id", "settings_role_id", "stay_247",
+    "idle_seconds", "alone_seconds", "autoplay_seeds", "announce_text",
+}
+
+
+def can_change_setting(interaction: discord.Interaction, key: str) -> bool:
+    """設定項目を変更できるか。
+
+    危険な設定: 管理者は常時可。それ以外は設定変更ロール所持者のみ
+    （ロール未設定なら管理者のみ）。それ以外の設定は通常の操作権限に従う。
+    """
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        return False
+    if interaction.user.guild_permissions.administrator:
+        return True
+    if key in DANGEROUS_SETTING_KEYS:
+        cfg = store.guild_config(interaction.guild.id)
+        role_id = cfg.get("settings_role_id")
+        if not role_id:
+            return False
+        return any(r.id == int(role_id) for r in interaction.user.roles)
+    return can_control(interaction)
