@@ -25,7 +25,7 @@ import store
 import lyrics as lyrics_mod
 from core import MAX_QUEUE_SHOW, FILTERS, FILTER_ORDER, filter_label
 from player import (GuildPlayer, PLAYERS, get_player, ensure_voice,
-                    add_query, add_tracks, play_next,
+                    add_query, add_query_priority, add_tracks, play_next,
                     disconnect_player, set_volume,
                     cycle_loop, LOOP_TEXT, can_control,
                     pause_playback, resume_playback,
@@ -341,9 +341,10 @@ class AddSongModal(discord.ui.Modal, title="曲を追加"):
         max_length=300,
     )
 
-    def __init__(self, bot: commands.Bot):
-        super().__init__()
+    def __init__(self, bot: commands.Bot, priority: bool = False):
+        super().__init__(title="割り込み予約（次に再生）" if priority else "曲を追加")
         self.bot = bot
+        self.priority = priority
 
     async def on_submit(self, interaction: discord.Interaction):
         await _safe_defer(interaction)
@@ -351,19 +352,25 @@ class AddSongModal(discord.ui.Modal, title="曲を追加"):
         query = str(self.query.value)
         try:
             await ensure_voice(player, interaction.user)
-            added, note = await add_query(
-                self.bot, player, query,
-                interaction.user.display_name, text_channel_id=interaction.channel_id)
+            if self.priority:
+                added, note = await add_query_priority(
+                    self.bot, player, query,
+                    interaction.user.display_name, text_channel_id=interaction.channel_id)
+            else:
+                added, note = await add_query(
+                    self.bot, player, query,
+                    interaction.user.display_name, text_channel_id=interaction.channel_id)
         except Exception as e:
             try:
                 await interaction.followup.send(f"❌ {e}", ephemeral=True)
             except discord.NotFound:
                 pass
             return
+        mark = "⏭️ 割り込み予約しました" if self.priority else "✅ 追加しました"
         if len(added) == 1:
-            msg = f"✅ 追加しました: **{added[0].title}**"
+            msg = f"{mark}: **{added[0].title}**"
         elif len(added) > 1:
-            msg = f"✅ {len(added)}曲を追加しました"
+            msg = f"{mark}: {len(added)}曲"
         else:
             msg = ""  # プレイリスト逐次追加中などは note 側が案内する
         if note:
@@ -610,6 +617,8 @@ class MusicPanelView(discord.ui.View):
             options=[
                 discord.SelectOption(label="曲を追加", value="add", emoji="➕",
                                      description="曲名・URL・Spotifyリンクを入力"),
+                discord.SelectOption(label="割り込み予約", value="add_priority", emoji="⏭️",
+                                     description="現在の曲の次に再生する"),
                 discord.SelectOption(label="一時停止 / 再開", value="toggle_pause", emoji="⏯️"),
                 discord.SelectOption(label="スキップ", value="skip", emoji="⏭️"),
                 discord.SelectOption(label="停止", value="stop", emoji="⏹️"),
@@ -632,6 +641,10 @@ class MusicPanelView(discord.ui.View):
         if action == "add":
             if not interaction.response.is_done():
                 await interaction.response.send_modal(AddSongModal(self.bot))
+            return
+        if action == "add_priority":
+            if not interaction.response.is_done():
+                await interaction.response.send_modal(AddSongModal(self.bot, priority=True))
             return
         await _safe_defer(interaction)
         player = get_player(interaction.guild_id)
