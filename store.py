@@ -29,17 +29,23 @@ DEFAULT_GUILD_CONFIG = {
     "stay_247": False,         # 24時間常駐モード（自動退出を無効化）
     "announce": True,          # 再生開始通知を出すか
     "repost_panel": True,      # 再生開始通知の直後にパネルを一番下へ再設置するか
+    "autoplay": False,         # キューが尽きたら関連曲を自動で流し続けるか
+    "last_vc_id": None,        # 最後に接続していたVC（常駐時の自動復帰先）
 }
 
 HISTORY_LIMIT = 50
 
 _data: dict = {
     "guilds": {},
-    "panels": {},
+    "panels": {},        # メインパネル
+    "sub_panels": {},    # サブパネル（再生中の曲情報）
+    "lyrics_panels": {},  # 歌詞パネル
     "favorites": {},
     "mylists": {},
     "history": {},
 }
+
+PANEL_KINDS = ("panels", "sub_panels", "lyrics_panels")
 
 
 def load_data() -> dict:
@@ -96,18 +102,35 @@ def set_guild_config(guild_id: int, **kwargs) -> dict:
 
 
 # ---------------------------------------------------------------- パネル設置場所
-def save_panel(guild_id: int, channel_id: int, message_id: int) -> None:
-    _data["panels"][str(guild_id)] = {"channel": channel_id, "message": message_id}
+def save_panel_loc(kind: str, guild_id: int, channel_id: int, message_id: int) -> None:
+    """kind: panels / sub_panels / lyrics_panels"""
+    _data[kind][str(guild_id)] = {"channel": channel_id, "message": message_id}
     save_data()
+
+
+def panel_loc(kind: str, guild_id: int) -> dict | None:
+    return _data[kind].get(str(guild_id))
+
+
+def all_panel_locs(kind: str) -> dict:
+    return dict(_data[kind])
+
+
+def drop_panel_loc(kind: str, guild_id: int) -> None:
+    _data[kind].pop(str(guild_id), None)
+    save_data()
+
+
+def save_panel(guild_id: int, channel_id: int, message_id: int) -> None:
+    save_panel_loc("panels", guild_id, channel_id, message_id)
 
 
 def panel_locations() -> dict:
-    return dict(_data["panels"])
+    return all_panel_locs("panels")
 
 
 def drop_panel(guild_id: int) -> None:
-    _data["panels"].pop(str(guild_id), None)
-    save_data()
+    drop_panel_loc("panels", guild_id)
 
 
 # ---------------------------------------------------------------- お気に入り
