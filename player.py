@@ -17,7 +17,8 @@ from discord.ext import commands
 
 import store
 from core import Track
-from sources import build_audio_source, resolve_query
+from sources import (build_audio_source, resolve_query, is_playlist_query,
+                     get_spotify_collection, search_with_fallback)
 
 
 async def _redraw(bot, player: "GuildPlayer"):
@@ -283,9 +284,73 @@ async def resolve_only(query: str, requester: str,
 async def add_query(bot: commands.Bot, player: GuildPlayer, query: str,
                     requester: str, text_channel_id: Optional[int] = None,
                     progress=None) -> tuple[list[Track], str]:
-    """入力を解決してキューへ追加し、止まっていれば再生を始める。"""
+    """入力を解決してキューへ追加し、止まっていれば再生を始める。
+
+    プレイリストの扱い（高速化仕様）:
+    - プレイリストは確認なしで自動シャッフルする。
+    - Spotifyプレイリスト/アルバムは、全曲解決を待たずに
+      「1曲ずつ解決してキューへ追加」をバックグラウンドで行い、
+      最初の曲が入り次第すぐ再生を始める。
+    - YouTubeプレイリスト / SoundCloudセットは一覧取得が1回で済むため、
+      シャッフルして一括追加する。
+    """
     if text_channel_id:
         player.text_channel_id = text_channel_id
+
+    # --- Spotify プレイリスト / アルバム: 逐次追加（バックグラウンド）
+    coll = await get_spotify_collection(query)
+    if coll is not None:
+        name, queries = coll
+        if not queries:
+            raise commands.CommandError("Spotifyプレイリストの読み取りに失敗しました。")
+        random.shuffle(queries)
+        label = f"「{name}」" if name else ""
+        session = player.session
+
+        async def fill_rest():
+            added = 0
+            for q in queries:
+                if player.session != session:
+                    return  # /停止 などで中断
+                try:
+                    track, _ = await search_with_fallback(q, requester)
+                    track.source = "spotify"
+                except Exception:
+                    continue
+                player.enqueue(track)
+                added += 1
+                await start_if_idle(bot, player)
+                if added % 10 == 0:
+                    await _redraw(bot, player)
+            if player.session != session:
+                return
+            await _redraw(bot, player)
+            if player.text_channel_id:
+                channel = bot.get_channel(player.text_channel_id)
+                if channel is not None:
+                    try:
+                        await channel.send(
+                            f"✅ Spotifyプレイリスト{label}の全{added}曲を追加しました（シャッフル済み）")
+                    except Exception:
+                        pass
+
+        asyncio.create_task(fill_rest())
+        return [], (f"📚 Spotifyプレイリスト{label}（{len(queries)}曲）をシャッフルして"
+                    "1曲ずつ追加しています。最初の曲から再生します。")
+
+    # --- YouTubeプレイリスト / SoundCloudセット: シャッフルして一括追加
+    if is_playlist_query(query):
+        tracks, note = await resolve_query(query, requester, progress=progress)
+        if len(tracks) > 1:
+            random.shuffle(tracks)
+            note += "\n（プレイリストをシャッフルして追加しました）"
+        for t in tracks:
+            player.enqueue(t)
+        await start_if_idle(bot, player)
+        await _redraw(bot, player)
+        return tracks, note
+
+    # --- 通常（単曲 / 検索）
     tracks, note = await resolve_query(query, requester, progress=progress)
     for t in tracks:
         player.enqueue(t)
