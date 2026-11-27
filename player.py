@@ -21,7 +21,7 @@ from core import Track
 from sources import (build_audio_source, build_audio_source_from_stream,
                      resolve_stream_url, resolve_query, is_playlist_query,
                      get_spotify_collection, search_with_fallback,
-                     fetch_related_tracks)
+                     fetch_related_tracks, fetch_search_tracks)
 
 
 async def _redraw(bot, player: "GuildPlayer"):
@@ -82,8 +82,13 @@ class GuildPlayer:
         self.last_voice_channel_id: Optional[int] = None
         self.rejoin_task: Optional[asyncio.Task] = None
         self.stopping: bool = False
-        # オートプレイの種曲キャッシュ: (設定文字列, 解決した曲)
-        self.seed_cache: Optional[tuple[str, Optional[Track]]] = None
+        # オートプレイ種曲プール: 候補曲リスト / 構築時の種曲署名 / 補充中フラグ
+        self.seed_pool: list[Track] = []
+        self.seed_pool_key: str = ""
+        self.refilling: bool = False
+        # 再生カウントと、オートプレイで追加した曲のクールダウン記録 {URL: 追加時の再生数}
+        self.play_count: int = 0
+        self.autoplay_mark: dict[str, int] = {}
 
     # ---- キュー操作
     def enqueue(self, track: Track) -> int:
@@ -201,26 +206,145 @@ def schedule_prefetch(player: GuildPlayer):
         player.prefetch_pending.discard(url)
 
 
-async def _autoplay_seed(player: GuildPlayer, cfg: dict) -> Optional[Track]:
-    """設定された種曲を解決して返す（未設定・失敗時は None）。
+AUTOPLAY_BATCH = 20        # 1回の補充で追加する曲数
+AUTOPLAY_LOW = 5           # キュー残りがこの数以下になったら補充する
+AUTOPLAY_COOLDOWN = 50     # オートプレイ追加曲が再び流れるまでの再生曲数
 
-    種曲はアーティスト名・曲名・URLのどれでも可。解決結果はキャッシュし、
-    設定が変わった時だけ取り直す。
+
+def effective_seeds(cfg: dict) -> list[str]:
+    """有効な種曲リスト（新リスト＋旧単一設定の互換マージ）。"""
+    seeds = [s for s in (cfg.get("autoplay_seeds") or []) if str(s).strip()]
+    old = (cfg.get("autoplay_seed") or "").strip()
+    if old and old not in seeds:
+        seeds.append(old)
+    return seeds
+
+
+async def _build_seed_pool(player: GuildPlayer, cfg: dict) -> list[Track]:
+    """全種曲から候補曲プールを構築する（種曲が変わった時だけ作り直す）。"""
+    seeds = effective_seeds(cfg)
+    key = "\n".join(seeds)
+    if player.seed_pool and player.seed_pool_key == key:
+        return player.seed_pool
+    pool: list[Track] = []
+    seen: set[str] = set()
+
+    def _add(tracks):
+        for t in tracks:
+            if t.webpage_url and t.webpage_url not in seen:
+                seen.add(t.webpage_url)
+                pool.append(t)
+
+    for seed in seeds:
+        try:
+            coll = await get_spotify_collection(seed)
+            if coll is not None:
+                _, queries = coll
+                got = 0
+                for q in queries:
+                    if got >= 40:
+                        break
+                    try:
+                        t, _ = await search_with_fallback(q, "オートプレイ")
+                        t.source = "spotify"
+                        _add([t])
+                        got += 1
+                    except Exception:
+                        continue
+            elif seed.startswith(("http://", "https://")):
+                tracks, _ = await resolve_query(seed, "オートプレイ")
+                _add(tracks)
+            else:
+                _add(await fetch_search_tracks(seed, "オートプレイ", limit=25))
+        except Exception:
+            continue
+        if len(pool) >= 300:
+            break
+    player.seed_pool = pool
+    player.seed_pool_key = key
+    return pool
+
+
+def _autoplay_eligible(player: GuildPlayer, track: Track) -> bool:
+    """オートプレイでその曲を今追加してよいか（クールダウン判定）。"""
+    url = track.webpage_url
+    if player.current and player.current.webpage_url == url:
+        return False
+    if any(t.webpage_url == url for t in player.queue):
+        return False
+    mark = player.autoplay_mark.get(url)
+    if mark is not None and player.play_count - mark < AUTOPLAY_COOLDOWN:
+        return False
+    return True
+
+
+async def _autoplay_refill(bot: commands.Bot, player: GuildPlayer,
+                             notify: bool = True) -> int:
+    """オートプレイ補充。追加した曲数を返す。
+
+    種曲あり: プールからシャッフルして20曲（クールダウン中の曲は除外）。
+    種曲なし: 最後に再生した曲の関連曲を10曲（従来動作）。
     """
-    q = (cfg.get("autoplay_seed") or "").strip()
-    if not q:
-        return None
-    if player.seed_cache and player.seed_cache[0] == q:
-        return player.seed_cache[1]
-    track: Optional[Track] = None
+    if player.refilling:
+        return 0
+    cfg = store.guild_config(player.guild_id)
+    seeds = effective_seeds(cfg)
+    player.refilling = True
+    added = 0
     try:
-        tracks, _ = await resolve_query(q, "オートプレイ")
-        if tracks:
-            track = tracks[0]
-    except Exception:
-        track = None
-    player.seed_cache = (q, track)
-    return track
+        if seeds:
+            pool = await _build_seed_pool(player, cfg)
+            candidates = [t for t in pool if _autoplay_eligible(player, t)]
+            random.shuffle(candidates)
+            for t in candidates[:AUTOPLAY_BATCH]:
+                player.enqueue(t)
+                player.autoplay_mark[t.webpage_url] = player.play_count
+                added += 1
+            label = "種曲"
+        else:
+            if player.current is None:
+                return 0
+            seed = player.current
+            related = []
+            try:
+                related = await fetch_related_tracks(
+                    seed, seed.requester, player.played_urls, limit=10)
+            except Exception:
+                related = []
+            if not related:
+                player.played_urls = {seed.webpage_url}
+                try:
+                    related = await fetch_related_tracks(
+                        seed, seed.requester, player.played_urls, limit=10)
+                except Exception:
+                    related = []
+            for t in related:
+                if _autoplay_eligible(player, t):
+                    player.enqueue(t)
+                    player.autoplay_mark[t.webpage_url] = player.play_count
+                    added += 1
+            label = f"「{seed.title}」の関連曲"
+        if added and notify and player.text_channel_id:
+            channel = bot.get_channel(player.text_channel_id)
+            if channel is not None:
+                try:
+                    await channel.send(
+                        f"📻 オートプレイ: {label}から{added}曲追加しました（残り{len(player.queue)}曲）",
+                        **_send_kwargs(player))
+                except Exception:
+                    pass
+        return added
+    finally:
+        player.refilling = False
+
+
+async def _autoplay_refill_bg(bot: commands.Bot, player: GuildPlayer):
+    """残り曲数が少なくなった時の背景補充（再生は止めない）。"""
+    try:
+        await _autoplay_refill(bot, player)
+        await _redraw(bot, player)
+    except Exception as e:
+        print(f"⚠️ オートプレイ補充に失敗: {e}")
 
 
 PLAYERS: dict[int, GuildPlayer] = {}
@@ -288,35 +412,9 @@ async def play_next(bot: commands.Bot, player: GuildPlayer):
         if player.voice.is_playing() or player.voice.is_paused():
             return  # 既に再生中なら二重起動しない
         cfg = store.guild_config(player.guild_id)
-        # --- オートプレイ: キューが尽きたら関連曲を補充して流し続ける
+        # --- オートプレイ: キューが尽きたら補充して流し続ける
         if not player.queue and cfg.get("autoplay") and player.current is not None:
-            seed = await _autoplay_seed(player, cfg) or player.current
-            related = []
-            try:
-                related = await fetch_related_tracks(
-                    seed, seed.requester, player.played_urls, limit=10)
-            except Exception:
-                related = []
-            if not related and (cfg.get("autoplay_seed") or "").strip():
-                # 種曲固定で候補が尽きたら、再生済みをリセットしてもう一周する
-                player.played_urls = {player.current.webpage_url}
-                try:
-                    related = await fetch_related_tracks(
-                        seed, seed.requester, player.played_urls, limit=10)
-                except Exception:
-                    related = []
-            if related:
-                for t in related:
-                    player.enqueue(t)
-                if player.text_channel_id:
-                    channel = bot.get_channel(player.text_channel_id)
-                    if channel is not None:
-                        try:
-                            await channel.send(
-                                f"📻 オートプレイ: 「{seed.title}」の関連曲を{len(related)}曲追加しました",
-                                **_send_kwargs(player))
-                        except Exception:
-                            pass
+            await _autoplay_refill(bot, player)
         track = None
         while player.queue:
             track = player.queue.pop(0)
@@ -367,7 +465,12 @@ async def play_next(bot: commands.Bot, player: GuildPlayer):
         player.paused_since = None
         player.paused_total = 0.0
         player.played_urls.add(track.webpage_url)
+        player.play_count += 1
         schedule_prefetch(player)
+        # オートプレイ: 残りが少なくなったら裏で補充しておく
+        if cfg.get("autoplay") and len(player.queue) <= AUTOPLAY_LOW \
+                and not player.refilling:
+            asyncio.create_task(_autoplay_refill_bg(bot, player))
         store.push_history(player.guild_id, track.to_dict())
         announced = False
         if cfg.get("announce", True) and player.text_channel_id:
@@ -442,6 +545,10 @@ async def disconnect_player(bot: commands.Bot, player: GuildPlayer):
     player.paused_total = 0.0
     player.prefetch.clear()
     player.played_urls.clear()
+    player.seed_pool = []
+    player.seed_pool_key = ""
+    player.autoplay_mark.clear()
+    player.play_count = 0
     if player.voice and player.voice.is_connected():
         await player.voice.disconnect(force=True)
     player.voice = None
@@ -542,25 +649,30 @@ async def restore_stay_sessions(bot: commands.Bot):
             player.voice = None
             continue
         if cfg.get("autoplay") and not player.queue:
-            hist = store.history(guild_id, 1)
-            if hist:
-                seed = Track.from_dict(hist[0], requester="オートプレイ")
-                try:
-                    related = await fetch_related_tracks(
-                        seed, "オートプレイ", set(), limit=10)
-                except Exception:
-                    related = []
-                for t in related:
-                    player.enqueue(t)
-                if related and player.text_channel_id:
-                    tc = bot.get_channel(player.text_channel_id)
-                    if tc is not None:
-                        try:
-                            await tc.send(
-                                f"📻 再起動から復帰: 関連曲{len(related)}曲で垂れ流しを再開します",
-                                **_send_kwargs(player))
-                        except Exception:
-                            pass
+            resumed = 0
+            if effective_seeds(cfg):
+                resumed = await _autoplay_refill(bot, player, notify=False)
+            else:
+                hist = store.history(guild_id, 1)
+                if hist:
+                    seed = Track.from_dict(hist[0], requester="オートプレイ")
+                    try:
+                        related = await fetch_related_tracks(
+                            seed, "オートプレイ", set(), limit=10)
+                    except Exception:
+                        related = []
+                    for t in related:
+                        player.enqueue(t)
+                    resumed = len(related)
+            if resumed and player.text_channel_id:
+                tc = bot.get_channel(player.text_channel_id)
+                if tc is not None:
+                    try:
+                        await tc.send(
+                            f"📻 再起動から復帰: {resumed}曲で垂れ流しを再開します",
+                            **_send_kwargs(player))
+                    except Exception:
+                        pass
         await start_if_idle(bot, player)
 
 
