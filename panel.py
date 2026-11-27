@@ -26,7 +26,7 @@ import lyrics as lyrics_mod
 from core import MAX_QUEUE_SHOW, FILTERS, FILTER_ORDER, filter_label
 from player import (GuildPlayer, PLAYERS, get_player, ensure_voice,
                     add_query, add_query_priority, add_tracks, play_next,
-                    disconnect_player, set_volume,
+                    disconnect_player, set_volume, effective_seeds,
                     cycle_loop, LOOP_TEXT, can_control,
                     pause_playback, resume_playback,
                     elapsed_seconds, progress_bar, format_seconds)
@@ -496,33 +496,101 @@ class NamePickView(discord.ui.View):
 
 
 # ---------------------------------------------------------------- 設定
-class AutoplaySeedModal(discord.ui.Modal, title="オートプレイの種曲を設定"):
+class AutoplaySeedModal(discord.ui.Modal, title="種曲を追加"):
     seed = discord.ui.TextInput(
-        label="アーティスト名・曲名・URL（空欄で解除）",
-        placeholder="例: YOASOBI（空欄＝最後に再生した曲ベース）",
-        max_length=200, required=False)
+        label="アーティスト名・曲名・プレイリストのURL",
+        placeholder="例: ヨルシカ / Ado / SpotifyプレイリストのURL",
+        max_length=200, required=True)
 
     def __init__(self, bot: commands.Bot, guild_id: int):
         super().__init__()
         self.bot = bot
         self.guild_id = guild_id
-        current = (store.guild_config(guild_id).get("autoplay_seed") or "")
-        self.seed.default = current
 
     async def on_submit(self, interaction: discord.Interaction):
         await _safe_defer(interaction)
         raw = str(self.seed.value or "").strip()
-        store.set_guild_config(self.guild_id, autoplay_seed=raw)
-        get_player(self.guild_id).seed_cache = None
-        if raw:
-            msg = (f"📻 オートプレイの種曲を「{raw}」に設定しました。"
-                   "キューが尽きたら、この曲・アーティストの関連曲を流します")
+        cfg = store.guild_config(self.guild_id)
+        seeds = effective_seeds(cfg)
+        if raw in seeds:
+            msg = "🌱 その種曲は既に登録されています"
         else:
-            msg = "📻 オートプレイの種曲を解除しました（最後に再生した曲ベースに戻ります）"
+            seeds.append(raw)
+            store.set_guild_config(self.guild_id,
+                                   autoplay_seeds=seeds, autoplay_seed="")
+            get_player(self.guild_id).seed_pool = []
+            msg = f"🌱 種曲に「{raw}」を追加しました（現在{len(seeds)}件）"
         try:
             await interaction.followup.send(msg, ephemeral=True)
         except discord.NotFound:
             pass
+
+
+class SeedManageView(discord.ui.View):
+    """種曲リストの管理（一覧から選んで削除／ボタンで追加・全解除）。"""
+
+    def __init__(self, bot: commands.Bot, guild_id: int):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.guild_id = guild_id
+        seeds = effective_seeds(store.guild_config(guild_id))
+        if seeds:
+            options = [
+                discord.SelectOption(label=f"{i + 1}. {s}"[:100], value=str(i))
+                for i, s in enumerate(seeds[:25])
+            ]
+            select = discord.ui.Select(
+                placeholder="🌱 種曲（選ぶと削除します）",
+                options=options, custom_id="super_music:seed_remove")
+            select.callback = self._remove
+            self.add_item(select)
+        add_btn = discord.ui.Button(
+            label="➕ 種曲を追加", style=discord.ButtonStyle.primary,
+            custom_id="super_music:seed_add")
+        add_btn.callback = self._add
+        self.add_item(add_btn)
+        if seeds:
+            clear_btn = discord.ui.Button(
+                label="🗑 全て解除", style=discord.ButtonStyle.danger,
+                custom_id="super_music:seed_clear")
+            clear_btn.callback = self._clear
+            self.add_item(clear_btn)
+
+    def _save(self, seeds: list[str]):
+        store.set_guild_config(self.guild_id,
+                               autoplay_seeds=seeds, autoplay_seed="")
+        get_player(self.guild_id).seed_pool = []
+
+    async def _remove(self, interaction: discord.Interaction):
+        if not await _can_manage(interaction):
+            return
+        try:
+            idx = int(interaction.data["values"][0])
+        except Exception:
+            return
+        seeds = effective_seeds(store.guild_config(self.guild_id))
+        if 0 <= idx < len(seeds):
+            removed = seeds.pop(idx)
+            self._save(seeds)
+            await interaction.response.send_message(
+                f"🌱 種曲「{removed}」を削除しました（残り{len(seeds)}件）",
+                ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "⚠️ 一覧が古くなっています。もう一度開いてください", ephemeral=True)
+
+    async def _add(self, interaction: discord.Interaction):
+        if not await _can_manage(interaction):
+            return
+        await interaction.response.send_modal(
+            AutoplaySeedModal(self.bot, self.guild_id))
+
+    async def _clear(self, interaction: discord.Interaction):
+        if not await _can_manage(interaction):
+            return
+        self._save([])
+        await interaction.response.send_message(
+            "🌱 種曲を全て解除しました（関連曲モードに戻ります）", ephemeral=True)
 
 
 class SettingValueModal(discord.ui.Modal, title="設定値を入力"):
@@ -580,7 +648,7 @@ class SettingsView(discord.ui.View):
         ("repost_panel", "お知らせ後にパネルを再設置 ON/OFF"),
         ("autoplay", "関連曲オートプレイ ON/OFF"),
         ("silent_notify", "BOTのお知らせをサイレントにする ON/OFF"),
-        ("autoplay_seed", "オートプレイの種曲（アーティスト・曲名・URL）"),
+        ("autoplay_seeds", "オートプレイの種曲リスト（複数登録可）"),
     ]
 
     def __init__(self, bot: commands.Bot, guild_id: int):
@@ -605,8 +673,9 @@ class SettingsView(discord.ui.View):
                 desc = f"現在: {'ON' if cfg.get('autoplay') else 'OFF'}"
             elif key == "silent_notify":
                 desc = f"現在: {'ON' if cfg.get('silent_notify') else 'OFF'}"
-            elif key == "autoplay_seed":
-                desc = f"現在: {cfg.get('autoplay_seed') or '未設定（最後の曲ベース）'}"
+            elif key == "autoplay_seeds":
+                _seeds = effective_seeds(cfg)
+                desc = f"現在: {len(_seeds)}件登録" if _seeds else "現在: 未設定（関連曲モード）"
             options.append(discord.SelectOption(label=label, value=key, description=desc[:100]))
         select = discord.ui.Select(placeholder="変更する設定を選んでください", options=options)
         select.callback = self._on_pick
@@ -629,10 +698,21 @@ class SettingsView(discord.ui.View):
             except discord.NotFound:
                 pass
             return
-        if key == "autoplay_seed":
-            if not interaction.response.is_done():
-                await interaction.response.send_modal(
-                    AutoplaySeedModal(self.bot, self.guild_id))
+        if key == "autoplay_seeds":
+            await _safe_defer(interaction)
+            seeds = effective_seeds(store.guild_config(self.guild_id))
+            listing = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(seeds[:25]))
+            if len(seeds) > 25:
+                listing += f"\n…他{len(seeds) - 25}件"
+            body = ("🌱 **種曲リスト**（何件でも登録できます）\n"
+                    "種曲のアーティストの曲を集めてシャッフルし、20曲ずつ補充します。\n"
+                    + (listing if listing else "（まだ登録がありません）"))
+            try:
+                await interaction.followup.send(
+                    body, view=SeedManageView(self.bot, self.guild_id),
+                    ephemeral=True)
+            except discord.NotFound:
+                pass
             return
         labels = dict(self.ITEMS)
         # モーダルは defer 前に返す必要があるため、未応答のまま send_modal する
