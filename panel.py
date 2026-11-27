@@ -129,6 +129,11 @@ async def redraw_all_panels(bot: commands.Bot):
         await update_sub_panel(bot, get_player(int(gid)), force=True)
     for gid in store.all_panel_locs("lyrics_panels"):
         await update_lyrics_panel(bot, get_player(int(gid)))
+    for gid in store.all_panel_locs("lyrics_search_panels"):
+        await _edit_typed_panel(bot, "lyrics_search_panels",
+                                get_player(int(gid)),
+                                lyrics_search_embed(int(gid)),
+                                LyricsSearchPanelView(bot))
     ensure_subpanel_loop(bot)
 
 
@@ -287,8 +292,40 @@ async def update_lyrics_panel(bot: commands.Bot, player: GuildPlayer):
                             lyrics_embed(player, text), LyricsPanelView(bot))
 
 
+class LyricsSearchModal(discord.ui.Modal, title="歌詞を手動検索"):
+    """作者＋曲名を入力して歌詞を探し、再生中の曲の歌詞として表示する。"""
+
+    artist = discord.ui.TextInput(
+        label="アーティスト名（作者）", required=True, max_length=100,
+        placeholder="例: 米津玄師")
+    song = discord.ui.TextInput(
+        label="曲名", required=True, max_length=100,
+        placeholder="例: Lemon")
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await _safe_defer(interaction)
+        artist = str(self.artist.value or "").strip()
+        song = str(self.song.value or "").strip()
+        text = await lyrics_mod.search_lyrics_manual(artist, song)
+        await update_lyrics_search_panel(self.bot, interaction.guild_id,
+                                         artist, song, text)
+        if text:
+            msg = f"🎤 「{artist} / {song}」の歌詞を検索パネルに表示しました"
+        else:
+            msg = (f"🎤 「{artist} / {song}」の歌詞は見つかりませんでした。"
+                   "表記（英語/日本語・正式名）を変えて試してみてください")
+        try:
+            await interaction.followup.send(msg, ephemeral=True)
+        except discord.NotFound:
+            pass
+
+
 class LyricsPanelView(discord.ui.View):
-    """歌詞パネル用（表示/更新ボタン）。timeout=None + 固定custom_id。"""
+    """歌詞パネル用（表示/更新＋手動検索ボタン）。timeout=None + 固定custom_id。"""
 
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=None)
@@ -325,6 +362,53 @@ class LyricsPanelView(discord.ui.View):
                     embed=lyrics_embed(player, text), view=LyricsPanelView(self.bot))
             except discord.NotFound:
                 pass
+
+
+# ---------------------------------------------------------------- 歌詞検索パネル（手動専用・自動更新なし）
+_lyrics_search_state: dict[int, tuple[str, str, Optional[str]]] = {}
+
+
+def lyrics_search_embed(guild_id: int) -> discord.Embed:
+    embed = discord.Embed(title="🔍 歌詞検索", color=0xFF6B9D)
+    state = _lyrics_search_state.get(guild_id)
+    if state is None:
+        embed.description = (
+            "下のボタンからアーティスト名と曲名を入力すると、歌詞を表示します。\n"
+            "このパネルは自動では変わりません（検索した時だけ更新されます）。")
+        return embed
+    artist, song, text = state
+    embed.add_field(name="曲", value=f"{artist} / {song}", inline=False)
+    if text:
+        embed.description = text
+    else:
+        embed.description = "この曲の歌詞は見つかりませんでした。"
+    return embed
+
+
+async def update_lyrics_search_panel(bot: commands.Bot, guild_id: int,
+                                     artist: str, song: str,
+                                     text: Optional[str]):
+    _lyrics_search_state[guild_id] = (artist, song, text)
+    await _edit_typed_panel(bot, "lyrics_search_panels", get_player(guild_id),
+                            lyrics_search_embed(guild_id),
+                            LyricsSearchPanelView(bot))
+
+
+class LyricsSearchPanelView(discord.ui.View):
+    """歌詞検索パネル用（検索ボタン）。timeout=None + 固定custom_id。"""
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+        btn = discord.ui.Button(custom_id="super_music:lyrics_search_open",
+                                label="歌詞を検索（アーティスト＋曲名）", emoji="🔍",
+                                style=discord.ButtonStyle.primary)
+        btn.callback = self._on_search
+        self.add_item(btn)
+
+    async def _on_search(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            await interaction.response.send_modal(LyricsSearchModal(self.bot))
 
 
 # ---------------------------------------------------------------- 汎用: 安全な defer
