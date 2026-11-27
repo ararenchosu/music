@@ -17,7 +17,7 @@ import discord
 from discord.ext import commands
 
 import store
-from core import Track
+from core import Track, BASE_DIR
 from sources import (build_audio_source, build_audio_source_from_stream,
                      resolve_stream_url, resolve_query, is_playlist_query,
                      get_spotify_collection, search_with_fallback,
@@ -82,6 +82,8 @@ class GuildPlayer:
         self.last_voice_channel_id: Optional[int] = None
         self.rejoin_task: Optional[asyncio.Task] = None
         self.stopping: bool = False
+        # 読み上げ連携ダッキング中か
+        self.ducked: bool = False
         # オートプレイ種曲プール: 候補曲リスト / 構築時の種曲署名 / 補充中フラグ
         self.seed_pool: list[Track] = []
         self.seed_pool_key: str = ""
@@ -356,6 +358,69 @@ def get_player(guild_id: int) -> GuildPlayer:
     return PLAYERS[guild_id]
 
 
+# ---------------------------------------------------------------- 読み上げ連携ダッキング
+# 読み上げBOTが発話中、共有ファイル tts_duck.json の {"until": 時刻} が
+# 未来を指す。配置の違い（単体 / 2in1 / リポジトリ構成）を吸収するため
+# 自フォルダと親フォルダの両方を見る。
+DUCK_LEVEL = 0.25            # ダッキング中の音量倍率（元の25%）
+_DUCK_FILES = [BASE_DIR / "tts_duck.json", BASE_DIR.parent / "tts_duck.json"]
+_duck_task: Optional[asyncio.Task] = None
+
+
+def _duck_active() -> bool:
+    import json as _json
+    now = time.time()
+    for path in _DUCK_FILES:
+        try:
+            if path.exists():
+                data = _json.loads(path.read_text(encoding="utf-8"))
+                if float(data.get("until", 0)) > now:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def _eff_volume(player: GuildPlayer) -> float:
+    """ダッキングを反映した実効音量（0.0〜2.0）。"""
+    v = player.volume / 100.0
+    return v * DUCK_LEVEL if player.ducked else v
+
+
+def _apply_volume(player: GuildPlayer):
+    if player.voice and player.voice.source is not None:
+        try:
+            player.voice.source.volume = _eff_volume(player)
+        except Exception:
+            pass
+
+
+async def _duck_watcher(bot: commands.Bot):
+    """1秒ごとに読み上げ状態を見て、再生中の音量を出し入れする。"""
+    while True:
+        try:
+            active = _duck_active()
+            for player in list(PLAYERS.values()):
+                if not player.voice or not player.voice.is_connected():
+                    if player.ducked:
+                        player.ducked = False
+                    continue
+                cfg = store.guild_config(player.guild_id)
+                want = active and bool(cfg.get("ducking", True))
+                if want != player.ducked:
+                    player.ducked = want
+                    _apply_volume(player)
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+
+
+def start_duck_watcher(bot: commands.Bot):
+    global _duck_task
+    if _duck_task is None or _duck_task.done():
+        _duck_task = asyncio.create_task(_duck_watcher(bot))
+
+
 # ---------------------------------------------------------------- DAVE暗号化の準備待ち
 def _can_encrypt(vc) -> bool:
     state = getattr(vc, "_connection", None) if vc else None
@@ -445,7 +510,7 @@ async def play_next(bot: commands.Bot, player: GuildPlayer):
             return
         if not _can_encrypt(player.voice):
             await _wait_encrypt_ready(player.voice, timeout=5.0)
-        source = discord.PCMVolumeTransformer(raw, volume=player.volume / 100.0)
+        source = discord.PCMVolumeTransformer(raw, volume=_eff_volume(player))
 
         def _after(err, _bot=bot, _player=player):
             if err:
@@ -513,11 +578,7 @@ def set_volume(player: GuildPlayer, percent: int) -> int:
     """音量を 0-200 に丸めて設定。再生中なら即反映する。"""
     percent = max(0, min(200, int(percent)))
     player.volume = percent
-    if player.voice and player.voice.source is not None:
-        try:
-            player.voice.source.volume = percent / 100.0
-        except Exception:
-            pass
+    _apply_volume(player)
     return percent
 
 
