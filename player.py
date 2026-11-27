@@ -191,7 +191,12 @@ def schedule_prefetch(player: GuildPlayer):
     if not url or url in player.prefetch or url in player.prefetch_pending:
         return
     player.prefetch_pending.add(url)
-    asyncio.create_task(_prefetch_one(player, nxt))
+    coro = _prefetch_one(player, nxt)
+    try:
+        asyncio.create_task(coro)
+    except RuntimeError:
+        coro.close()
+        player.prefetch_pending.discard(url)
 
 
 PLAYERS: dict[int, GuildPlayer] = {}
@@ -658,6 +663,86 @@ async def add_query(bot: commands.Bot, player: GuildPlayer, query: str,
     tracks, note = await resolve_query(query, requester, progress=progress)
     for t in tracks:
         player.enqueue(t)
+    await start_if_idle(bot, player)
+    await _redraw(bot, player)
+    return tracks, note
+
+
+def insert_next(player: GuildPlayer, tracks: list[Track]) -> None:
+    """曲をキューの先頭へ割り込ませる（順番は維持）。"""
+    for t in reversed(list(tracks)):
+        player.queue.insert(0, t)
+    try:
+        schedule_prefetch(player)
+    except Exception:
+        pass
+
+
+async def add_query_priority(bot: commands.Bot, player: GuildPlayer, query: str,
+                             requester: str,
+                             text_channel_id: Optional[int] = None) -> tuple[list[Track], str]:
+    """割り込み予約: 解決した曲をキューの先頭へ入れ、現在の曲の次に再生する。
+
+    Spotifyプレイリスト/アルバムは通常追加と同じく1曲ずつ解決するが、
+    追加先がキューの先頭ブロックになる（順番を保って割り込む）。
+    """
+    if text_channel_id:
+        player.text_channel_id = text_channel_id
+
+    coll = await get_spotify_collection(query)
+    if coll is not None:
+        name, queries = coll
+        if not queries:
+            raise commands.CommandError("Spotifyプレイリストの読み取りに失敗しました。")
+        random.shuffle(queries)
+        label = f"「{name}」" if name else ""
+        session = player.session
+        state = {"idx": 0, "added": 0}
+
+        async def fill_priority():
+            for q in queries:
+                if player.session != session:
+                    return
+                try:
+                    track, _ = await search_with_fallback(q, requester)
+                    track.source = "spotify"
+                except Exception:
+                    continue
+                player.queue.insert(state["idx"], track)
+                state["idx"] += 1
+                state["added"] += 1
+                try:
+                    schedule_prefetch(player)
+                except Exception:
+                    pass
+                try:
+                    await start_if_idle(bot, player)
+                except Exception as e:
+                    print(f"⚠️ 割り込み追加中の再生開始に失敗（続行します）: {e}")
+                if state["added"] % 10 == 0:
+                    await _redraw(bot, player)
+            if player.session != session:
+                return
+            await _redraw(bot, player)
+            if player.text_channel_id:
+                channel = bot.get_channel(player.text_channel_id)
+                if channel is not None:
+                    try:
+                        await channel.send(
+                            f"⏭️ 割り込み予約: Spotifyプレイリスト{label}の全{state['added']}曲を先頭に追加しました",
+                            **_send_kwargs(player))
+                    except Exception:
+                        pass
+
+        asyncio.create_task(fill_priority())
+        return [], (f"⏭️ 割り込み予約: Spotifyプレイリスト{label}（{len(queries)}曲）をシャッフルして"
+                    "キューの先頭へ1曲ずつ入れています。現在の曲の次から再生します。")
+
+    tracks, note = await resolve_query(query, requester)
+    if is_playlist_query(query) and len(tracks) > 1:
+        random.shuffle(tracks)
+        note += "\n（プレイリストをシャッフルしました）"
+    insert_next(player, tracks)
     await start_if_idle(bot, player)
     await _redraw(bot, player)
     return tracks, note
