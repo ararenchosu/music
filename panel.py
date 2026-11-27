@@ -496,6 +496,35 @@ class NamePickView(discord.ui.View):
 
 
 # ---------------------------------------------------------------- 設定
+class AutoplaySeedModal(discord.ui.Modal, title="オートプレイの種曲を設定"):
+    seed = discord.ui.TextInput(
+        label="アーティスト名・曲名・URL（空欄で解除）",
+        placeholder="例: YOASOBI（空欄＝最後に再生した曲ベース）",
+        max_length=200, required=False)
+
+    def __init__(self, bot: commands.Bot, guild_id: int):
+        super().__init__()
+        self.bot = bot
+        self.guild_id = guild_id
+        current = (store.guild_config(guild_id).get("autoplay_seed") or "")
+        self.seed.default = current
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await _safe_defer(interaction)
+        raw = str(self.seed.value or "").strip()
+        store.set_guild_config(self.guild_id, autoplay_seed=raw)
+        get_player(self.guild_id).seed_cache = None
+        if raw:
+            msg = (f"📻 オートプレイの種曲を「{raw}」に設定しました。"
+                   "キューが尽きたら、この曲・アーティストの関連曲を流します")
+        else:
+            msg = "📻 オートプレイの種曲を解除しました（最後に再生した曲ベースに戻ります）"
+        try:
+            await interaction.followup.send(msg, ephemeral=True)
+        except discord.NotFound:
+            pass
+
+
 class SettingValueModal(discord.ui.Modal, title="設定値を入力"):
     value = discord.ui.TextInput(label="値", max_length=20)
 
@@ -551,6 +580,7 @@ class SettingsView(discord.ui.View):
         ("repost_panel", "お知らせ後にパネルを再設置 ON/OFF"),
         ("autoplay", "関連曲オートプレイ ON/OFF"),
         ("silent_notify", "BOTのお知らせをサイレントにする ON/OFF"),
+        ("autoplay_seed", "オートプレイの種曲（アーティスト・曲名・URL）"),
     ]
 
     def __init__(self, bot: commands.Bot, guild_id: int):
@@ -575,6 +605,8 @@ class SettingsView(discord.ui.View):
                 desc = f"現在: {'ON' if cfg.get('autoplay') else 'OFF'}"
             elif key == "silent_notify":
                 desc = f"現在: {'ON' if cfg.get('silent_notify') else 'OFF'}"
+            elif key == "autoplay_seed":
+                desc = f"現在: {cfg.get('autoplay_seed') or '未設定（最後の曲ベース）'}"
             options.append(discord.SelectOption(label=label, value=key, description=desc[:100]))
         select = discord.ui.Select(placeholder="変更する設定を選んでください", options=options)
         select.callback = self._on_pick
@@ -596,6 +628,11 @@ class SettingsView(discord.ui.View):
                     f"⚙️ {label} を **{'ON' if new_val else 'OFF'}** にしました", ephemeral=True)
             except discord.NotFound:
                 pass
+            return
+        if key == "autoplay_seed":
+            if not interaction.response.is_done():
+                await interaction.response.send_modal(
+                    AutoplaySeedModal(self.bot, self.guild_id))
             return
         labels = dict(self.ITEMS)
         # モーダルは defer 前に返す必要があるため、未応答のまま send_modal する
