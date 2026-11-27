@@ -14,17 +14,22 @@ panel.py — 常設パネルと各種セレクトView
 - Interaction に属性を追加して状態を渡さない（状態はView自身が持つ）。
 """
 
+import asyncio
+import urllib.parse
 from typing import Optional
 
 import discord
 from discord.ext import commands
 
 import store
+import lyrics as lyrics_mod
 from core import MAX_QUEUE_SHOW, FILTERS, FILTER_ORDER, filter_label
 from player import (GuildPlayer, PLAYERS, get_player, ensure_voice,
                     add_query, add_tracks, play_next,
                     disconnect_player, set_volume,
-                    cycle_loop, LOOP_TEXT, can_control)
+                    cycle_loop, LOOP_TEXT, can_control,
+                    pause_playback, resume_playback,
+                    elapsed_seconds, progress_bar, format_seconds)
 
 
 # ---------------------------------------------------------------- Embed
@@ -40,6 +45,10 @@ def panel_embed(player: GuildPlayer) -> discord.Embed:
     embed.add_field(name="音量", value=f"{player.volume}%", inline=True)
     embed.add_field(name="フィルター", value=filter_label(player.filter_key), inline=True)
     embed.add_field(name="待機中", value=f"{len(player.queue)} 曲", inline=True)
+    cfg = store.guild_config(player.guild_id)
+    embed.add_field(name="オートプレイ",
+                    value="📻 ON（関連曲を自動再生）" if cfg.get("autoplay") else "OFF",
+                    inline=True)
     if player.queue:
         lines = [f"{i + 1}. {t.title}" for i, t in enumerate(player.queue[:5])]
         if len(player.queue) > 5:
@@ -116,6 +125,206 @@ async def redraw_all_panels(bot: commands.Bot):
     """on_ready 用: 保存されている全パネルを再描画する。"""
     for gid in store.panel_locations():
         await _redraw(bot, get_player(int(gid)))
+    for gid in store.all_panel_locs("sub_panels"):
+        await update_sub_panel(bot, get_player(int(gid)), force=True)
+    for gid in store.all_panel_locs("lyrics_panels"):
+        await update_lyrics_panel(bot, get_player(int(gid)))
+    ensure_subpanel_loop(bot)
+
+
+# ---------------------------------------------------------------- サブパネル（再生中の曲情報）
+def _spotify_link(player: GuildPlayer) -> str:
+    cur = player.current
+    if cur is None:
+        return ""
+    if cur.origin_url:
+        return cur.origin_url
+    q = urllib.parse.quote(cur.title)
+    return f"https://open.spotify.com/search/{q}"
+
+
+def subpanel_embed(player: GuildPlayer) -> discord.Embed:
+    embed = discord.Embed(title="🎧 再生中の曲", color=0x1DB954)
+    cur = player.current
+    if cur is None:
+        embed.description = "再生中の曲はありません。"
+        return embed
+    embed.description = f"**{cur.title}**"
+    if cur.thumbnail:
+        embed.set_image(url=cur.thumbnail)
+    paused = bool(player.voice and player.voice.is_paused())
+    elapsed = elapsed_seconds(player)
+    if cur.duration:
+        bar = progress_bar(player)
+        state = "⏸ 一時停止中" if paused else "▶️ 再生中"
+        embed.add_field(
+            name="進捗",
+            value=f"{state}　{format_seconds(elapsed)} / {cur.duration_text()}\n{bar}",
+            inline=False)
+    else:
+        embed.add_field(name="進捗", value="🔴 ライブ/長さ不明の曲です", inline=False)
+    links = [f"[YouTubeで開く]({cur.webpage_url})"]
+    if cur.source == "spotify" or cur.origin_url:
+        links.insert(0, f"[Spotifyで開く]({_spotify_link(player)})")
+    else:
+        links.append(f"[Spotifyで探す]({_spotify_link(player)})")
+    embed.add_field(name="リンク", value=" ｜ ".join(links), inline=False)
+    embed.add_field(name="リクエスト", value=cur.requester or "-", inline=True)
+    embed.add_field(name="待機中", value=f"{len(player.queue)} 曲", inline=True)
+    return embed
+
+
+def _sub_signature(player: GuildPlayer) -> str:
+    cur = player.current
+    if cur is None:
+        return "none"
+    paused = bool(player.voice and player.voice.is_paused())
+    return f"{cur.webpage_url}|{int(elapsed_seconds(player)) // 5}|{paused}|{len(player.queue)}"
+
+
+async def _edit_typed_panel(bot, kind: str, player: GuildPlayer,
+                            embed: discord.Embed, view: discord.ui.View):
+    loc = store.panel_loc(kind, player.guild_id)
+    if not loc:
+        return
+    try:
+        channel = bot.get_channel(loc["channel"])
+        if channel is None:
+            channel = await bot.fetch_channel(loc["channel"])
+        message = await channel.fetch_message(loc["message"])
+        await message.edit(embed=embed, view=view)
+    except discord.NotFound:
+        store.drop_panel_loc(kind, player.guild_id)
+    except Exception:
+        pass
+
+
+async def update_sub_panel(bot: commands.Bot, player: GuildPlayer, force: bool = False):
+    """サブパネルを現在の曲・進捗で更新する（変化が無い時は編集しない）。"""
+    if not store.panel_loc("sub_panels", player.guild_id):
+        return
+    sig = _sub_signature(player)
+    if not force and sig == player.sub_sig:
+        return
+    player.sub_sig = sig
+    await _edit_typed_panel(bot, "sub_panels", player,
+                            subpanel_embed(player), SubPanelView(bot))
+
+
+class SubPanelView(discord.ui.View):
+    """サブパネル用（更新ボタンのみ）。timeout=None + 固定custom_id。"""
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+        btn = discord.ui.Button(custom_id="super_music:sub_refresh",
+                                label="更新", emoji="🔄", style=discord.ButtonStyle.secondary)
+        btn.callback = self._on_refresh
+        self.add_item(btn)
+
+    async def _on_refresh(self, interaction: discord.Interaction):
+        player = get_player(interaction.guild_id)
+        player.sub_sig = ""  # 強制更新
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.edit_message(
+                    embed=subpanel_embed(player), view=SubPanelView(self.bot))
+            except discord.NotFound:
+                pass
+        player.sub_sig = _sub_signature(player)
+
+
+_subpanel_loop_task: Optional[asyncio.Task] = None
+
+
+async def _subpanel_tick(bot: commands.Bot):
+    while True:
+        await asyncio.sleep(15)
+        try:
+            for gid in store.all_panel_locs("sub_panels"):
+                player = get_player(int(gid))
+                if player.current is not None:
+                    await update_sub_panel(bot, player)
+        except Exception:
+            pass
+
+
+def ensure_subpanel_loop(bot: commands.Bot):
+    """サブパネルの進捗を15秒ごとに進める定期タスク（多重起動防止付き）。"""
+    global _subpanel_loop_task
+    if _subpanel_loop_task is None or _subpanel_loop_task.done():
+        _subpanel_loop_task = asyncio.create_task(_subpanel_tick(bot))
+
+
+# ---------------------------------------------------------------- 歌詞パネル
+def lyrics_embed(player: GuildPlayer, text: Optional[str],
+                 fetched: bool = True) -> discord.Embed:
+    embed = discord.Embed(title="🎤 歌詞", color=0xFF6B9D)
+    cur = player.current
+    if cur is None:
+        embed.description = "再生中の曲はありません。"
+        return embed
+    embed.add_field(name="曲", value=cur.title, inline=False)
+    if text:
+        embed.description = text
+    elif fetched:
+        embed.description = "この曲の歌詞は見つかりませんでした。"
+    else:
+        embed.description = "下の「歌詞を表示 / 更新」ボタンで取得します。"
+    return embed
+
+
+async def update_lyrics_panel(bot: commands.Bot, player: GuildPlayer):
+    """曲が変わった時に歌詞パネルを更新する（キャッシュがあれば即、無ければ取得）。"""
+    if not store.panel_loc("lyrics_panels", player.guild_id):
+        return
+    if player.current is None:
+        await _edit_typed_panel(bot, "lyrics_panels", player,
+                                lyrics_embed(player, None), LyricsPanelView(bot))
+        return
+    text = await lyrics_mod.fetch_lyrics(player.current)
+    await _edit_typed_panel(bot, "lyrics_panels", player,
+                            lyrics_embed(player, text), LyricsPanelView(bot))
+
+
+class LyricsPanelView(discord.ui.View):
+    """歌詞パネル用（表示/更新ボタン）。timeout=None + 固定custom_id。"""
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+        btn = discord.ui.Button(custom_id="super_music:lyrics_refresh",
+                                label="歌詞を表示 / 更新", emoji="🎤",
+                                style=discord.ButtonStyle.primary)
+        btn.callback = self._on_refresh
+        self.add_item(btn)
+
+    async def _on_refresh(self, interaction: discord.Interaction):
+        player = get_player(interaction.guild_id)
+        if player.current is None:
+            if not interaction.response.is_done():
+                try:
+                    await interaction.response.edit_message(
+                        embed=lyrics_embed(player, None), view=LyricsPanelView(self.bot))
+                except discord.NotFound:
+                    pass
+            return
+        # 先に「取得中」で応答してから、取得後にパネルメッセージ自体を書き換える
+        loading = lyrics_embed(player, None, fetched=False)
+        loading.description = "🎤 歌詞を取得中…"
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.edit_message(
+                    embed=loading, view=LyricsPanelView(self.bot))
+            except discord.NotFound:
+                return
+        text = await lyrics_mod.fetch_lyrics(player.current)
+        if interaction.message is not None:
+            try:
+                await interaction.message.edit(
+                    embed=lyrics_embed(player, text), view=LyricsPanelView(self.bot))
+            except discord.NotFound:
+                pass
 
 
 # ---------------------------------------------------------------- 汎用: 安全な defer
@@ -333,6 +542,7 @@ class SettingsView(discord.ui.View):
         ("stay_247", "24時間常駐モード ON/OFF"),
         ("announce", "再生開始のお知らせ ON/OFF"),
         ("repost_panel", "お知らせ後にパネルを再設置 ON/OFF"),
+        ("autoplay", "関連曲オートプレイ ON/OFF"),
     ]
 
     def __init__(self, bot: commands.Bot, guild_id: int):
@@ -353,6 +563,8 @@ class SettingsView(discord.ui.View):
                 desc = f"現在: {'ON' if cfg.get('announce') else 'OFF'}"
             elif key == "repost_panel":
                 desc = f"現在: {'ON' if cfg.get('repost_panel') else 'OFF'}"
+            elif key == "autoplay":
+                desc = f"現在: {'ON' if cfg.get('autoplay') else 'OFF'}"
             options.append(discord.SelectOption(label=label, value=key, description=desc[:100]))
         select = discord.ui.Select(placeholder="変更する設定を選んでください", options=options)
         select.callback = self._on_pick
@@ -360,13 +572,14 @@ class SettingsView(discord.ui.View):
 
     async def _on_pick(self, interaction: discord.Interaction):
         key = interaction.data["values"][0]
-        if key in ("stay_247", "announce", "repost_panel"):
+        if key in ("stay_247", "announce", "repost_panel", "autoplay"):
             await _safe_defer(interaction)
             cfg = store.guild_config(self.guild_id)
             new_val = not cfg.get(key, False)
             store.set_guild_config(self.guild_id, **{key: new_val})
             label = {"stay_247": "24時間常駐モード", "announce": "再生開始のお知らせ",
-                     "repost_panel": "お知らせ後にパネルを再設置"}[key]
+                     "repost_panel": "お知らせ後にパネルを再設置",
+                     "autoplay": "関連曲オートプレイ"}[key]
             try:
                 await interaction.followup.send(
                     f"⚙️ {label} を **{'ON' if new_val else 'OFF'}** にしました", ephemeral=True)
@@ -403,6 +616,8 @@ class MusicPanelView(discord.ui.View):
                 discord.SelectOption(label="再生中の曲をお気に入りに追加", value="fav_add", emoji="⭐"),
                 discord.SelectOption(label="フィルター変更", value="filter", emoji="🎛️"),
                 discord.SelectOption(label="音量変更", value="volume", emoji="🔊"),
+                discord.SelectOption(label="オートプレイ切替", value="autoplay", emoji="📻",
+                                     description="キューが尽きたら関連曲を自動で流し続ける"),
             ])
         select.callback = self._on_action
         self.add_item(select)
@@ -428,14 +643,21 @@ class MusicPanelView(discord.ui.View):
             return
 
         if action == "toggle_pause":
-            if player.voice and player.voice.is_playing():
-                player.voice.pause()
+            if pause_playback(player):
                 await say("⏸ 一時停止しました")
-            elif player.voice and player.voice.is_paused():
-                player.voice.resume()
+                await update_sub_panel(self.bot, player, force=True)
+            elif resume_playback(player):
                 await say("▶️ 再開しました")
+                await update_sub_panel(self.bot, player, force=True)
             else:
                 await say("再生中の曲がありません")
+        elif action == "autoplay":
+            cfg = store.guild_config(interaction.guild_id)
+            new_val = not cfg.get("autoplay", False)
+            store.set_guild_config(interaction.guild_id, autoplay=new_val)
+            await say(f"📻 オートプレイを **{'ON' if new_val else 'OFF'}** にしました"
+                      "（キューが尽きた時に関連曲を自動追加します）")
+            await _redraw(self.bot, player)
         elif action == "skip":
             if player.voice and (player.voice.is_playing() or player.voice.is_paused()):
                 player.voice.stop()
@@ -491,4 +713,3 @@ class MusicPanelView(discord.ui.View):
                     view=VolumeView(self.bot), ephemeral=True)
             except discord.NotFound:
                 pass
-
