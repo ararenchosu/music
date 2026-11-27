@@ -59,12 +59,8 @@ async def resolve_track_query(url: str) -> Optional[str]:
     return f"{title} {artist}".strip()
 
 
-async def resolve_collection_queries(url: str) -> tuple[Optional[str], list[str]]:
-    """プレイリスト/アルバム -> (名前, [検索語...])。
-
-    埋め込みページの __NEXT_DATA__ -> entity.trackList
-    （title=曲名, subtitle=アーティスト名）を読む。取れなければ正規表現で拾う。
-    """
+async def _resolve_collection_embed(url: str) -> tuple[Optional[str], list[str]]:
+    """埋め込みページから取る方法（曲数に上限があるため予備扱い）。"""
     m = COLLECTION_RE.search(url)
     if not m:
         return None, []
@@ -99,3 +95,112 @@ async def resolve_collection_queries(url: str) -> tuple[Optional[str], list[str]
             if nm:
                 name = nm.group(1)
     return name, queries
+
+
+# ---------------------------------------------------------------- 全曲取得（Web API・匿名トークン）
+# 埋め込みページの trackList は大きいプレイリストだと途中で切れるため、
+# Webプレイヤー用の匿名トークンで公式APIをページングして全曲を取る。
+# APIが使えない環境では埋め込み方式にフォールバックする。
+import time as _time
+
+_token_cache: tuple[str, float] = ("", 0.0)
+
+
+async def _web_token() -> Optional[str]:
+    global _token_cache
+    token, expires = _token_cache
+    if token and _time.time() < expires - 60:
+        return token
+    url = ("https://open.spotify.com/get_access_token"
+           "?reason=transport&productType=web_player")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=_HEADERS,
+                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        token = data.get("accessToken")
+        if not token:
+            return None
+        ttl = int(data.get("accessTokenExpirationTimestampMs", 0) // 1000
+                  - _time.time()) if data.get(
+                      "accessTokenExpirationTimestampMs") else 3000
+        _token_cache = (token, _time.time() + max(600, ttl))
+        return token
+    except Exception:
+        return None
+
+
+def _query_of(track_obj) -> Optional[str]:
+    if not track_obj or track_obj.get("type") not in (None, "track"):
+        return None
+    title = (track_obj.get("name") or "").strip()
+    if not title:
+        return None
+    artists = track_obj.get("artists") or []
+    artist = (artists[0].get("name") or "").strip() if artists else ""
+    return f"{artist} {title}".strip()
+
+
+async def _fetch_collection_api(kind: str, spotify_id: str):
+    """公式APIをページングして (名前, [検索語...全曲]) を返す。失敗時は (None, [])。"""
+    token = await _web_token()
+    if not token:
+        return None, []
+    headers = {"Authorization": f"Bearer {token}", **_HEADERS}
+    limit = 100 if kind == "playlist" else 50
+    base = f"https://api.spotify.com/v1/{kind}s/{spotify_id}"
+    name: Optional[str] = None
+    queries: list[str] = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(base, headers=headers,
+                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    meta = await resp.json()
+                    name = meta.get("name")
+            offset = 0
+            while True:
+                page_url = f"{base}/tracks?limit={limit}&offset={offset}"
+                async with session.get(page_url, headers=headers,
+                                       timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    if resp.status != 200:
+                        return (name, queries) if queries else (None, [])
+                    data = await resp.json()
+                items = data.get("items") or []
+                if not items:
+                    break
+                for item in items:
+                    obj = item.get("track") if kind == "playlist" else item
+                    q = _query_of(obj)
+                    if q:
+                        queries.append(q)
+                offset += len(items)
+                total = data.get("total")
+                if total is not None and offset >= int(total):
+                    break
+                if len(items) < limit:
+                    break
+    except Exception:
+        return (name, queries) if queries else (None, [])
+    return name, queries
+
+
+async def resolve_collection_queries(url: str) -> tuple[Optional[str], list[str]]:
+    """プレイリスト/アルバム -> (名前, [検索語...])。全曲取得を優先する。"""
+    m = COLLECTION_RE.search(url)
+    if not m:
+        return None, []
+    kind, spotify_id = m.group(1), m.group(2)
+    api_name, api_queries = await _fetch_collection_api(kind, spotify_id)
+    if api_queries:
+        emb_name, emb_queries = None, []
+        # APIで取れた数が埋め込み以上ならAPIを採用（通常はこちらが全曲）
+        if len(api_queries) >= 100:
+            return api_name, api_queries
+        emb_name, emb_queries = await _resolve_collection_embed(url)
+        if len(emb_queries) > len(api_queries):
+            return emb_name, emb_queries
+        return api_name or emb_name, api_queries
+    return await _resolve_collection_embed(url)
