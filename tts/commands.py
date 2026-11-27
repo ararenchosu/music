@@ -250,6 +250,61 @@ async def cmd_voicediag(interaction: discord.Interaction):
     await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
+@bot.tree.command(name="timer", description="指定した分後にVCで読み上げます（タイマー）")
+@app_commands.describe(minutes="何分後か（1〜720）", text="読み上げる内容（省略時は「時間になりました」）")
+async def cmd_timer(interaction: discord.Interaction, minutes: int, text: str = ""):
+    import time as _time
+    import timers as timers_mod
+    if not (1 <= minutes <= 720):
+        await interaction.response.send_message("⏰ 分は1〜720で指定してください", ephemeral=True)
+        return
+    fire_at = _time.time() + minutes * 60
+    timers_mod.add_timer(interaction.guild.id, fire_at,
+                         (text or "").strip(), interaction.user.id,
+                         interaction.user.display_name)
+    await interaction.response.send_message(
+        f"⏰ {minutes}分後にタイマーをセットしました"
+        + (f"（内容: {text.strip()}）" if text.strip() else ""),
+        ephemeral=True)
+
+
+@bot.tree.command(name="timers", description="予約中のタイマー一覧を表示します")
+async def cmd_timers(interaction: discord.Interaction):
+    import time as _time
+    import datetime as _dt
+    import timers as timers_mod
+    items = timers_mod.list_timers(interaction.guild.id)
+    if not items:
+        await interaction.response.send_message("⏰ 予約中のタイマーはありません。/timer でセットできます", ephemeral=True)
+        return
+    now = _time.time()
+    lines = []
+    for i, t in enumerate(items):
+        remain = max(0, int(t["fire_at"] - now))
+        when = _dt.datetime.fromtimestamp(t["fire_at"]).strftime("%H:%M")
+        lines.append(f"{i + 1}. {when}（あと約{remain // 60}分） {t.get('text') or '時間になりました'}"
+                     f"（{t.get('user_name', '?')}）")
+    await interaction.response.send_message(
+        "⏰ **タイマー一覧**\n" + "\n".join(lines) + "\n取消は /timer_cancel 番号", ephemeral=True)
+
+
+@bot.tree.command(name="timer_cancel", description="タイマーを取り消します")
+@app_commands.describe(number="一覧の番号")
+async def cmd_timer_cancel(interaction: discord.Interaction, number: int):
+    import timers as timers_mod
+    items = timers_mod.list_timers(interaction.guild.id)
+    if not (1 <= number <= len(items)):
+        await interaction.response.send_message("その番号のタイマーはありません", ephemeral=True)
+        return
+    target = items[number - 1]
+    if target.get("user_id") != interaction.user.id and not is_privileged(interaction.user):
+        await interaction.response.send_message("他人のタイマーは取り消せません", ephemeral=True)
+        return
+    removed = timers_mod.cancel_timer(interaction.guild.id, number - 1)
+    await interaction.response.send_message(
+        f"🗑 タイマーを取り消しました: {removed.get('text') or '時間になりました'}", ephemeral=True)
+
+
 @bot.tree.command(name="ttshelp", description="読み上げBOTの使い方を表示します")
 async def cmd_help(interaction: discord.Interaction):
     text = (
@@ -259,6 +314,7 @@ async def cmd_help(interaction: discord.Interaction):
         "`/voice` 自分の声を変更 ｜ `/skip` 今の読み上げを飛ばす\n"
         "`/word_add` `/word_remove` `/word_list` 単語辞書\n"
         "`/join` `/leave` 手動の入室・退出 ｜ `/mute_tts` 特定ユーザーを読み上げ対象外に\n"
+        "`/timer` ◯分後に読み上げ ｜ `/timers` 一覧 ｜ `/timer_cancel` 取消\n"
         "`/voicediag` 音声が聞こえない時の診断 ｜ `/ttstest` 合成の確認\n"
         "※ 開発者ポータルで MESSAGE CONTENT INTENT を ON にしてください。"
     )
