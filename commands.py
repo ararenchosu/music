@@ -17,13 +17,14 @@ from discord.ext import commands as ext_commands
 import store
 from core import bot, Track, COOKIE_FILE, filter_label, FILTERS, FFMPEG, OPUS_LOADED
 from player import (get_player, ensure_voice, add_query, add_tracks,
+                    resolve_only,
                     disconnect_player, set_volume, cycle_loop, LOOP_TEXT,
                     can_control, _wait_encrypt_ready, _can_encrypt)
 from panel import (MusicPanelView, panel_embed, queue_embed,
                    FilterView, VolumeView, QueueRemoveView, SettingsView,
-                   TrackPickView, NamePickView)
+                   TrackPickView, NamePickView, ShuffleAskView)
 from sources import (extract_raw_youtube, summarize_formats,
-                     check_soundcloud, BUILD_TAG)
+                     check_soundcloud, BUILD_TAG, is_playlist_query)
 
 
 def _player(interaction: discord.Interaction):
@@ -48,8 +49,24 @@ async def cmd_play(interaction: discord.Interaction, 入力: str):
     player = _player(interaction)
     try:
         await ensure_voice(player, interaction.user)
-        added, note = await add_query(bot, player, 入力, interaction.user.display_name,
-                                      text_channel_id=interaction.channel_id)
+        if is_playlist_query(入力):
+            tracks, note = await resolve_only(入力, interaction.user.display_name)
+            view = ShuffleAskView(len(tracks))
+            view.message = await interaction.followup.send(
+                f"📚 プレイリスト（{len(tracks)}曲）を検知しました。シャッフルしますか？",
+                view=view)
+            await view.wait()
+            shuffle = bool(view.choice)
+            await add_tracks(bot, player, tracks,
+                             text_channel_id=interaction.channel_id, shuffle=shuffle)
+            added = tracks
+            if view.choice is None:
+                note += "\n（無選択だったので、そのままの順番で追加しました）"
+            elif shuffle:
+                note += "\n（シャッフルして追加しました）"
+        else:
+            added, note = await add_query(bot, player, 入力, interaction.user.display_name,
+                                          text_channel_id=interaction.channel_id)
     except Exception as e:
         await interaction.followup.send(f"❌ {e}")
         return
