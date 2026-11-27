@@ -230,6 +230,21 @@ async def build_audio_source(webpage_url: str, filter_key: str = "none") -> disc
     return build_audio_source_from_stream(stream, filter_key)
 
 
+async def fetch_search_tracks(query: str, requester: str, limit: int = 25) -> list[Track]:
+    """検索語の上位結果を複数曲返す（種曲プール用）。"""
+    try:
+        info = await ytdl_extract(f"ytsearch{limit}:{query}", flat=True)
+    except Exception:
+        return []
+    out: list[Track] = []
+    for entry in (info.get("entries") or []):
+        if entry and entry.get("id"):
+            t = make_track(entry, requester, source="youtube")
+            if t.webpage_url:
+                out.append(t)
+    return out
+
+
 # ---------------------------------------------------------------- 関連曲（オートプレイ用）
 def _youtube_video_id(url: str) -> str:
     from urllib.parse import urlparse, parse_qs
