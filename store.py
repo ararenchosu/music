@@ -30,6 +30,8 @@ DEFAULT_GUILD_CONFIG = {
     "announce": True,          # 再生開始通知を出すか
     "ducking": True,           # 読み上げBOTの発話中は音楽を自動で小さくする
     "announce_tts": True,      # 曲の開始を読み上げBOTに読み上げてもらう
+    "announce_text": "次は、{title} です",  # 曲名アナウンスの文章（{title}が曲名）
+    "settings_role_id": None,  # 設定変更ロール（危険な設定の変更に必要。None=管理者のみ）
     "repost_panel": True,      # 再生開始通知の直後にパネルを一番下へ再設置するか
     "autoplay": False,         # キューが尽きたら関連曲を自動で流し続けるか
     "last_vc_id": None,        # 最後に接続していたVC（常駐時の自動復帰先）
