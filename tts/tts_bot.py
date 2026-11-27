@@ -30,6 +30,7 @@ from core import bot, TOKEN
 
 import speech    # noqa: F401  発言リスナー登録
 import resident  # noqa: F401  常駐イベント登録
+import timers    # noqa: F401  タイマー監視ループ登録
 import panel     # noqa: F401  パネル自動更新リスナー登録
 import commands  # noqa: F401  スラッシュコマンド登録
 
