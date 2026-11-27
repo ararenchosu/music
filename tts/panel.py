@@ -19,7 +19,7 @@ panel.py — 設定パネル v2（全部セレクトメニュー式）
 import discord
 
 from core import (bot, store, is_privileged, VOICES, RATES, RATE_LABELS,
-                  MAX_CHARS_CHOICES)
+                  MAX_CHARS_CHOICES, VOLUME_CHOICES)
 from speech import get_session, skip_current, clear_queue
 
 
@@ -51,6 +51,7 @@ def panel_embed(guild: discord.Guild) -> discord.Embed:
                     value=VOICES.get(cfg.get("default_voice", "nanami"), ("", "?"))[1], inline=True)
     embed.add_field(name="速度", value=RATE_LABELS.get(cfg.get("rate", "+0%"), "普通"), inline=True)
     embed.add_field(name="最大文字数", value=f"{cfg.get('max_chars', 100)}文字", inline=True)
+    embed.add_field(name="音量", value=f"{cfg.get('volume', 100)}%", inline=True)
     embed.add_field(name="単語辞書", value=f"{len(cfg.get('dictionary', {}))}件", inline=True)
     q = session.queue.qsize()
     embed.add_field(name="読み上げ待ち", value=f"{q}件", inline=True)
@@ -189,6 +190,7 @@ class PanelView(discord.ui.View):
                 discord.SelectOption(label="🎵 曲名アナウンス読み上げ ON/OFF", value="announce_music"),
                 discord.SelectOption(label="📝 最大文字数を切り替え（50→100→200→300）", value="max_chars"),
                 discord.SelectOption(label="🏃 読み上げ速度を切り替え", value="rate"),
+                discord.SelectOption(label="🔊 読み上げ音量を切り替え（50→80→100→120→150→200%）", value="volume"),
                 discord.SelectOption(label="📝 文章・権限の設定（あいさつ文/タイマー文/設定変更ロール）", value="texts"),
             ],
             min_values=1, max_values=1, row=3,
@@ -316,6 +318,11 @@ class PanelView(discord.ui.View):
             idx = RATES.index(cur) if cur in RATES else 1
             cfg["rate"] = RATES[(idx + 1) % len(RATES)]
             note = f"速度を {RATE_LABELS[cfg['rate']]} にしました"
+        elif key == "volume":
+            cur = cfg.get("volume", 100)
+            idx = VOLUME_CHOICES.index(cur) if cur in VOLUME_CHOICES else 2
+            cfg["volume"] = VOLUME_CHOICES[(idx + 1) % len(VOLUME_CHOICES)]
+            note = f"読み上げ音量を {cfg['volume']}% にしました（次の読み上げから）"
         else:
             note = "変更しました"
         store.save()
