@@ -18,10 +18,13 @@ import store
 from core import bot, Track, COOKIE_FILE, filter_label, FILTERS, FFMPEG, OPUS_LOADED
 from player import (get_player, ensure_voice, add_query, add_tracks,
                     disconnect_player, set_volume, cycle_loop, LOOP_TEXT,
-                    can_control, _wait_encrypt_ready, _can_encrypt)
+                    can_control, _wait_encrypt_ready, _can_encrypt,
+                    pause_playback, resume_playback)
 from panel import (MusicPanelView, panel_embed, queue_embed,
                    FilterView, VolumeView, QueueRemoveView, SettingsView,
-                   TrackPickView, NamePickView)
+                   TrackPickView, NamePickView,
+                   SubPanelView, subpanel_embed, update_sub_panel,
+                   LyricsPanelView, lyrics_embed)
 from sources import (extract_raw_youtube, summarize_formats,
                      check_soundcloud, BUILD_TAG)
 
@@ -69,9 +72,9 @@ async def cmd_pause(interaction: discord.Interaction):
     if not await _require_control(interaction):
         return
     player = _player(interaction)
-    if player.voice and player.voice.is_playing():
-        player.voice.pause()
+    if pause_playback(player):
         await interaction.response.send_message("⏸ 一時停止しました", ephemeral=True)
+        await update_sub_panel(bot, player, force=True)
     else:
         await interaction.response.send_message("再生中の曲がありません", ephemeral=True)
 
@@ -81,9 +84,9 @@ async def cmd_resume(interaction: discord.Interaction):
     if not await _require_control(interaction):
         return
     player = _player(interaction)
-    if player.voice and player.voice.is_paused():
-        player.voice.resume()
+    if resume_playback(player):
         await interaction.response.send_message("▶️ 再開しました", ephemeral=True)
+        await update_sub_panel(bot, player, force=True)
     else:
         await interaction.response.send_message("一時停止中の曲がありません", ephemeral=True)
 
@@ -439,6 +442,33 @@ async def cmd_panel_setup(interaction: discord.Interaction):
     store.save_panel(interaction.guild_id, interaction.channel_id, message.id)
 
 
+@bot.tree.command(name="サブパネル設置", description="再生中の曲情報（画像・進捗・リンク）を表示するサブパネルをこのチャンネルに設置します")
+@app_commands.default_permissions(administrator=True)
+async def cmd_subpanel_setup(interaction: discord.Interaction):
+    player = _player(interaction)
+    player.sub_sig = ""
+    await interaction.response.send_message(embed=subpanel_embed(player),
+                                            view=SubPanelView(bot))
+    message = await interaction.original_response()
+    store.save_panel_loc("sub_panels", interaction.guild_id, interaction.channel_id, message.id)
+    from panel import ensure_subpanel_loop
+    ensure_subpanel_loop(bot)
+
+
+@bot.tree.command(name="歌詞パネル設置", description="再生中の曲の歌詞を表示する歌詞パネルをこのチャンネルに設置します")
+@app_commands.default_permissions(administrator=True)
+async def cmd_lyricspanel_setup(interaction: discord.Interaction):
+    player = _player(interaction)
+    await interaction.response.send_message(
+        embed=lyrics_embed(player, None, fetched=False),
+        view=LyricsPanelView(bot))
+    message = await interaction.original_response()
+    store.save_panel_loc("lyrics_panels", interaction.guild_id, interaction.channel_id, message.id)
+    if player.current:
+        from panel import update_lyrics_panel
+        await update_lyrics_panel(bot, player)
+
+
 @bot.tree.command(name="設定", description="サーバー設定（DJロール / 音量 / 自動退出 / 常駐 / お知らせ）")
 @app_commands.default_permissions(administrator=True)
 async def cmd_settings(interaction: discord.Interaction):
@@ -451,6 +481,7 @@ async def cmd_settings(interaction: discord.Interaction):
         f"・24時間常駐モード: {'ON' if cfg.get('stay_247') else 'OFF'}",
         f"・再生開始のお知らせ: {'ON' if cfg.get('announce') else 'OFF'}",
         f"・お知らせ後にパネルを再設置: {'ON' if cfg.get('repost_panel') else 'OFF'}",
+        f"・関連曲オートプレイ: {'ON' if cfg.get('autoplay') else 'OFF'}",
     ]
     await interaction.response.send_message(
         "⚙️ **現在の設定**\n" + "\n".join(lines) + "\n\n変更する項目を選んでください",
@@ -548,6 +579,9 @@ async def cmd_help(interaction: discord.Interaction):
         "`/再生 <曲名 or URL>` 再生 / キュー追加（YouTube・SoundCloud・Spotify対応。"
         "YouTubeが取得できない時は SoundCloud へ自動で切り替わります）\n"
         "`/パネル設置` セレクト1つで操作できる常設パネルを設置\n"
+        "`/サブパネル設置` 再生中の曲（画像・進捗・リンク）パネルを設置\n"
+        "`/歌詞パネル設置` 再生中の曲の歌詞パネルを設置\n"
+        "パネルの「📻 オートプレイ切替」で、キューが尽きた時に関連曲を自動再生\n"
         "`/一時停止` `/再開` `/スキップ` `/停止` 再生コントロール\n"
         "`/キュー` `/キュー削除` `/全消去` `/シャッフル` キュー管理\n"
         "`/ループ` ループ切替 ｜ `/音量` 0-200 ｜ `/フィルター` 低音ブースト等\n"
@@ -560,8 +594,17 @@ async def cmd_help(interaction: discord.Interaction):
 # ---------------------------------------------------------------- VC退出検知
 @bot.event
 async def on_voice_state_update(member: discord.Member, before, after):
-    """人が全員抜けたら、設定秒数後にBOTも退出する（常駐モード時は除く）。"""
+    """人が全員抜けたら、設定秒数後にBOTも退出する（常駐モード時は除く）。
+
+    BOT自身が意図せずVCから落ちた場合は、常駐ONなら自動復帰する。
+    """
     if member.bot:
+        if bot.user and member.id == bot.user.id \
+                and before.channel is not None and after.channel is None:
+            from player import PLAYERS, handle_bot_voice_drop
+            player = PLAYERS.get(member.guild.id)
+            if player is not None:
+                handle_bot_voice_drop(bot, player)
         return
     from player import PLAYERS, schedule_alone_disconnect, cancel_alone_disconnect
     for player in list(PLAYERS.values()):
