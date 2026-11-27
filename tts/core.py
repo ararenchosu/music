@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {
     "rate": "+0%",
     "max_chars": 100,
     "dictionary": {},            # サーバー共通の単語辞書 {単語: 読み}
+    "timers": [],                # タイマー読み上げ [{fire_at, text, user_id, user_name}]
     "users": {},                 # {uid: {"voice": key, "muted": bool}}
     "panel": None,               # {"channel": id, "message": id}
 }
@@ -87,6 +88,9 @@ class Store:
         else:
             for k, v in DEFAULT_CONFIG.items():
                 cfg.setdefault(k, v)
+        # リスト型デフォルトの共有を防ぐ
+        if cfg.get("timers") is DEFAULT_CONFIG["timers"]:
+            cfg["timers"] = []
         return cfg
 
     def save(self):
