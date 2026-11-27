@@ -27,7 +27,7 @@ from core import MAX_QUEUE_SHOW, FILTERS, FILTER_ORDER, filter_label
 from player import (GuildPlayer, PLAYERS, get_player, ensure_voice,
                     add_query, add_query_priority, add_tracks, play_next,
                     disconnect_player, set_volume, effective_seeds,
-                    cycle_loop, LOOP_TEXT, can_control,
+                    cycle_loop, LOOP_TEXT, can_control, can_change_setting,
                     pause_playback, resume_playback,
                     elapsed_seconds, progress_bar, format_seconds)
 
@@ -509,6 +509,13 @@ class AutoplaySeedModal(discord.ui.Modal, title="種曲を追加"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await _safe_defer(interaction)
+        if not can_change_setting(interaction, "autoplay_seeds"):
+            try:
+                await interaction.followup.send(
+                    "🔐 種曲の変更は設定変更ロール所持者か管理者のみです", ephemeral=True)
+            except discord.NotFound:
+                pass
+            return
         raw = str(self.seed.value or "").strip()
         cfg = store.guild_config(self.guild_id)
         seeds = effective_seeds(cfg)
@@ -561,8 +568,18 @@ class SeedManageView(discord.ui.View):
                                autoplay_seeds=seeds, autoplay_seed="")
         get_player(self.guild_id).seed_pool = []
 
+    async def _guard(self, interaction: discord.Interaction) -> bool:
+        if can_change_setting(interaction, "autoplay_seeds"):
+            return True
+        try:
+            await interaction.response.send_message(
+                "🔐 種曲の変更は設定変更ロール所持者か管理者のみです", ephemeral=True)
+        except Exception:
+            pass
+        return False
+
     async def _remove(self, interaction: discord.Interaction):
-        if not await _can_manage(interaction):
+        if not await self._guard(interaction):
             return
         try:
             idx = int(interaction.data["values"][0])
@@ -580,13 +597,13 @@ class SeedManageView(discord.ui.View):
                 "⚠️ 一覧が古くなっています。もう一度開いてください", ephemeral=True)
 
     async def _add(self, interaction: discord.Interaction):
-        if not await _can_manage(interaction):
+        if not await self._guard(interaction):
             return
         await interaction.response.send_modal(
             AutoplaySeedModal(self.bot, self.guild_id))
 
     async def _clear(self, interaction: discord.Interaction):
-        if not await _can_manage(interaction):
+        if not await self._guard(interaction):
             return
         self._save([])
         await interaction.response.send_message(
@@ -605,6 +622,13 @@ class SettingValueModal(discord.ui.Modal, title="設定値を入力"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await _safe_defer(interaction)
+        if not can_change_setting(interaction, self.key):
+            try:
+                await interaction.followup.send(
+                    "🔐 この設定の変更は設定変更ロール所持者か管理者のみです", ephemeral=True)
+            except discord.NotFound:
+                pass
+            return
         raw = str(self.value.value).strip()
         try:
             if self.key == "dj_role_id":
@@ -615,6 +639,14 @@ class SettingValueModal(discord.ui.Modal, title="設定値を入力"):
                     role_id = int(raw.strip("<@&>"))
                     store.set_guild_config(self.guild_id, dj_role_id=role_id)
                     msg = f"DJロールを <@&{role_id}> に設定しました"
+            elif self.key == "settings_role_id":
+                if raw == "":
+                    store.set_guild_config(self.guild_id, settings_role_id=None)
+                    msg = "設定変更ロールを解除しました（危険な設定は管理者のみ変更可）"
+                else:
+                    role_id = int(raw.strip("<@&>"))
+                    store.set_guild_config(self.guild_id, settings_role_id=role_id)
+                    msg = f"設定変更ロールを <@&{role_id}> に設定しました"
             elif self.key == "default_volume":
                 v = max(0, min(200, int(raw)))
                 store.set_guild_config(self.guild_id, default_volume=v)
@@ -628,9 +660,44 @@ class SettingValueModal(discord.ui.Modal, title="設定値を入力"):
             else:
                 msg = "不明な設定項目です"
         except ValueError:
-            msg = "❌ 数字で入力してください（DJロールはロールID、空欄で解除）"
+            msg = "❌ 数字で入力してください（ロールはロールID、空欄で解除）"
         try:
             await interaction.followup.send(msg, ephemeral=True)
+        except discord.NotFound:
+            pass
+
+
+class TextSettingModal(discord.ui.Modal, title="文章の設定"):
+    """読み上げ文章などのテキスト設定用モーダル。"""
+
+    value = discord.ui.TextInput(
+        label="文章", required=False, max_length=200,
+        style=discord.TextStyle.long)
+
+    def __init__(self, bot: commands.Bot, guild_id: int, key: str, label: str):
+        super().__init__()
+        self.bot = bot
+        self.guild_id = guild_id
+        self.key = key
+        self.value.label = label
+        current = store.guild_config(guild_id).get(key)
+        self.value.default = current or ""
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await _safe_defer(interaction)
+        if not can_change_setting(interaction, self.key):
+            try:
+                await interaction.followup.send(
+                    "🔐 この設定の変更は設定変更ロール所持者か管理者のみです", ephemeral=True)
+            except discord.NotFound:
+                pass
+            return
+        raw = str(self.value.value or "").strip()
+        store.set_guild_config(self.guild_id, **{self.key: raw})
+        try:
+            await interaction.followup.send(
+                f"📝 文章を設定しました: {raw or '（空欄＝デフォルト）'}",
+                ephemeral=True)
         except discord.NotFound:
             pass
 
@@ -650,6 +717,8 @@ class SettingsView(discord.ui.View):
         ("silent_notify", "BOTのお知らせをサイレントにする ON/OFF"),
         ("ducking", "読み上げ中は音楽を自動で小さく ON/OFF"),
         ("announce_tts", "曲名アナウンス（読み上げBOTが読み上げ） ON/OFF"),
+        ("announce_text", "曲名アナウンスの文章（{title}＝曲名）"),
+        ("settings_role_id", "設定変更ロール（危険な設定の変更に必要）"),
         ("autoplay_seeds", "オートプレイの種曲リスト（複数登録可）"),
     ]
 
@@ -679,6 +748,10 @@ class SettingsView(discord.ui.View):
                 desc = f"現在: {'ON' if cfg.get('ducking', True) else 'OFF'}"
             elif key == "announce_tts":
                 desc = f"現在: {'ON' if cfg.get('announce_tts', True) else 'OFF'}"
+            elif key == "announce_text":
+                desc = "現在: " + (cfg.get("announce_text") or "次は、{title} です")
+            elif key == "settings_role_id":
+                desc = f"現在: {cfg.get('settings_role_id') or '未設定（管理者のみ）'}"
             elif key == "autoplay_seeds":
                 _seeds = effective_seeds(cfg)
                 desc = f"現在: {len(_seeds)}件登録" if _seeds else "現在: 未設定（関連曲モード）"
@@ -689,6 +762,19 @@ class SettingsView(discord.ui.View):
 
     async def _on_pick(self, interaction: discord.Interaction):
         key = interaction.data["values"][0]
+        if not can_change_setting(interaction, key):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "🔐 この設定の変更は設定変更ロール所持者か管理者のみです"
+                    "（危険な設定の場合）。通常の設定はDJロール/管理者権限に従います",
+                    ephemeral=True)
+            return
+        if key == "announce_text":
+            if not interaction.response.is_done():
+                await interaction.response.send_modal(
+                    TextSettingModal(self.bot, self.guild_id, key,
+                                     "曲名アナウンスの文章（{title}＝曲名）"))
+            return
         if key in ("stay_247", "announce", "repost_panel", "autoplay", "silent_notify", "ducking", "announce_tts"):
             await _safe_defer(interaction)
             cfg = store.guild_config(self.guild_id)
