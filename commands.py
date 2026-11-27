@@ -448,6 +448,7 @@ async def cmd_settings(interaction: discord.Interaction):
         f"・BOTだけ残った時の自動退出: {cfg.get('alone_seconds')}秒",
         f"・24時間常駐モード: {'ON' if cfg.get('stay_247') else 'OFF'}",
         f"・再生開始のお知らせ: {'ON' if cfg.get('announce') else 'OFF'}",
+        f"・お知らせ後にパネルを再設置: {'ON' if cfg.get('repost_panel') else 'OFF'}",
     ]
     await interaction.response.send_message(
         "⚙️ **現在の設定**\n" + "\n".join(lines) + "\n\n変更する項目を選んでください",
