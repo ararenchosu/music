@@ -19,7 +19,7 @@ from core import bot, Track, COOKIE_FILE, filter_label, FILTERS, FFMPEG, OPUS_LO
 from player import (get_player, ensure_voice, add_query, add_query_priority,
                     add_tracks,
                     disconnect_player, set_volume, cycle_loop, LOOP_TEXT,
-                    can_control, _wait_encrypt_ready, _can_encrypt,
+                    can_control, _wait_encrypt_ready, _can_encrypt, effective_seeds,
                     pause_playback, resume_playback)
 from panel import (MusicPanelView, panel_embed, queue_embed,
                    FilterView, VolumeView, QueueRemoveView, SettingsView,
@@ -32,6 +32,14 @@ from sources import (extract_raw_youtube, summarize_formats,
 
 def _player(interaction: discord.Interaction):
     return get_player(interaction.guild_id)
+
+
+def _seed_summary(cfg: dict) -> str:
+    seeds = effective_seeds(cfg)
+    if not seeds:
+        return "未設定（最後に再生した曲の関連曲モード）"
+    head = "、".join(seeds[:3])
+    return f"{len(seeds)}件（{head}{' …' if len(seeds) > 3 else ''}）"
 
 
 async def _require_control(interaction: discord.Interaction) -> bool:
@@ -511,7 +519,7 @@ async def cmd_settings(interaction: discord.Interaction):
         f"・お知らせ後にパネルを再設置: {'ON' if cfg.get('repost_panel') else 'OFF'}",
         f"・関連曲オートプレイ: {'ON' if cfg.get('autoplay') else 'OFF'}",
         f"・お知らせをサイレントにする: {'ON' if cfg.get('silent_notify') else 'OFF'}",
-        f"・オートプレイの種曲: {cfg.get('autoplay_seed') or '未設定（最後に再生した曲ベース）'}",
+        f"・オートプレイの種曲: {_seed_summary(cfg)}",
     ]
     await interaction.response.send_message(
         "⚙️ **現在の設定**\n" + "\n".join(lines) + "\n\n変更する項目を選んでください",
