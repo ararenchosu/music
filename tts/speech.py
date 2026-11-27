@@ -41,6 +41,61 @@ def _clear_duck():
     except Exception:
         pass
 
+
+# ---------------------------------------------------------------- 曲名アナウンス受信
+# 音楽BOTが曲の開始時に書く tts_announce.json を2秒ごとに確認し、
+# 新しい曲名なら読み上げキューに入れる（30秒以上古いものは読まない）。
+ANNOUNCE_FILES = [BASE_DIR.parent / "tts_announce.json",
+                  BASE_DIR / "tts_announce.json"]
+_last_announce_id: Optional[str] = None
+_announce_loop_started = False
+
+
+async def _check_announce():
+    global _last_announce_id
+    for path in ANNOUNCE_FILES:
+        try:
+            if not path.exists():
+                continue
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        aid = data.get("id")
+        if not aid or aid == _last_announce_id:
+            return
+        _last_announce_id = aid
+        if time.time() - float(data.get("ts", 0)) > 30:
+            return
+        gid = int(data.get("guild_id") or 0)
+        if not gid:
+            return
+        cfg = store.cfg(gid)
+        if not cfg.get("announce_music", True):
+            return
+        session = get_session(gid)
+        if session.connected():
+            await enqueue(session, str(data.get("text", "")),
+                          cfg.get("default_voice", "nanami"),
+                          cfg.get("rate", "+0%"))
+        return
+
+
+async def _announce_loop():
+    while True:
+        try:
+            await _check_announce()
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+
+@bot.listen("on_ready")
+async def _start_announce_loop():
+    global _announce_loop_started
+    if not _announce_loop_started:
+        _announce_loop_started = True
+        asyncio.create_task(_announce_loop())
+
 # ---------------------------------------------------------------- テキスト整形
 _URL_RE = re.compile(r"https?://\S+|www\.\S+")
 _CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
