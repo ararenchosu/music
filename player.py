@@ -83,6 +83,29 @@ def get_player(guild_id: int) -> GuildPlayer:
     return PLAYERS[guild_id]
 
 
+# ---------------------------------------------------------------- DAVE暗号化の準備待ち
+def _can_encrypt(vc) -> bool:
+    state = getattr(vc, "_connection", None) if vc else None
+    return bool(getattr(state, "can_encrypt", False)) if state is not None else False
+
+
+async def _wait_encrypt_ready(vc, timeout: float = 10.0) -> bool:
+    """DAVEセッションの暗号化準備（MLSハンドシェイク完了）を待つ。
+
+    準備ができる前に再生を始めると、暗号化されていないフレームが
+    全クライアントに黙って捨てられ「再生中なのに無音」になる。
+    """
+    waited = 0.0
+    while waited < timeout:
+        if _can_encrypt(vc):
+            return True
+        await asyncio.sleep(0.5)
+        waited += 0.5
+    ok = _can_encrypt(vc)
+    print(f"🔐 DAVE暗号化準備: {'OK' if ok else 'タイムアウト（暗号化可にならなかった）'}")
+    return ok
+
+
 # ---------------------------------------------------------------- VC接続
 async def ensure_voice(player: GuildPlayer, member: discord.Member) -> discord.VoiceClient:
     if member.voice is None or member.voice.channel is None:
@@ -91,8 +114,10 @@ async def ensure_voice(player: GuildPlayer, member: discord.Member) -> discord.V
     if player.voice and player.voice.is_connected():
         if player.voice.channel.id != channel.id:
             await player.voice.move_to(channel)
+            await _wait_encrypt_ready(player.voice)
     else:
         player.voice = await channel.connect(self_deaf=True)
+        await _wait_encrypt_ready(player.voice)
     return player.voice
 
 
@@ -117,6 +142,8 @@ async def play_next(bot: commands.Bot, player: GuildPlayer):
         return
     if player.voice is None or not player.voice.is_connected():
         return
+    if not _can_encrypt(player.voice):
+        await _wait_encrypt_ready(player.voice, timeout=5.0)
     source = discord.PCMVolumeTransformer(raw, volume=player.volume / 100.0)
 
     def _after(err, _bot=bot, _player=player):
