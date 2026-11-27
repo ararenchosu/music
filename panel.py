@@ -14,7 +14,6 @@ panel.py — 常設パネルと各種セレクトView
 - Interaction に属性を追加して状態を渡さない（状態はView自身が持つ）。
 """
 
-import asyncio
 from typing import Optional
 
 import discord
@@ -23,10 +22,9 @@ from discord.ext import commands
 import store
 from core import MAX_QUEUE_SHOW, FILTERS, FILTER_ORDER, filter_label
 from player import (GuildPlayer, PLAYERS, get_player, ensure_voice,
-                    add_query, add_tracks, resolve_only, play_next,
+                    add_query, add_tracks, play_next,
                     disconnect_player, set_volume,
                     cycle_loop, LOOP_TEXT, can_control)
-from sources import is_playlist_query
 
 
 # ---------------------------------------------------------------- Embed
@@ -126,51 +124,6 @@ async def _safe_defer(interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
 
-# ---------------------------------------------------------------- プレイリストのシャッフル確認
-class ShuffleAskView(discord.ui.View):
-    """プレイリスト検知時に「シャッフルするか」を聞くセレクト。
-
-    choice: True=シャッフル / False=そのまま / None=無選択（60秒タイムアウト）
-    """
-
-    def __init__(self, count: int):
-        super().__init__(timeout=60)
-        self.count = count
-        self.choice: Optional[bool] = None
-        self.message: Optional[discord.Message] = None
-        select = discord.ui.Select(
-            placeholder="シャッフルしますか？",
-            options=[
-                discord.SelectOption(label="シャッフルして追加", value="shuffle", emoji="🔀"),
-                discord.SelectOption(label="そのままの順番で追加", value="normal", emoji="➡️"),
-            ])
-        select.callback = self._on_pick
-        self.add_item(select)
-
-    async def _on_pick(self, interaction: discord.Interaction):
-        self.choice = interaction.data["values"][0] == "shuffle"
-        for child in self.children:
-            child.disabled = True
-        if not interaction.response.is_done():
-            try:
-                await interaction.response.edit_message(
-                    content=f"📚 プレイリスト（{self.count}曲）を"
-                            f"{'シャッフルして' if self.choice else 'そのままの順番で'}追加します…",
-                    view=self)
-            except discord.NotFound:
-                pass
-        self.stop()
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        if self.message is not None:
-            try:
-                await self.message.edit(view=self)
-            except Exception:
-                pass
-
-
 # ---------------------------------------------------------------- 曲追加モーダル
 class AddSongModal(discord.ui.Modal, title="曲を追加"):
     query = discord.ui.TextInput(
@@ -189,35 +142,23 @@ class AddSongModal(discord.ui.Modal, title="曲を追加"):
         query = str(self.query.value)
         try:
             await ensure_voice(player, interaction.user)
-            if is_playlist_query(query):
-                tracks, note = await resolve_only(query, interaction.user.display_name)
-                view = ShuffleAskView(len(tracks))
-                view.message = await interaction.followup.send(
-                    f"📚 プレイリスト（{len(tracks)}曲）を検知しました。シャッフルしますか？",
-                    view=view, ephemeral=True)
-                await view.wait()
-                shuffle = bool(view.choice)
-                await add_tracks(self.bot, player, tracks,
-                                 text_channel_id=interaction.channel_id, shuffle=shuffle)
-                added = tracks
-                if view.choice is None:
-                    note += "\n（無選択だったので、そのままの順番で追加しました）"
-                elif shuffle:
-                    note += "\n（シャッフルして追加しました）"
-            else:
-                added, note = await add_query(
-                    self.bot, player, query,
-                    interaction.user.display_name, text_channel_id=interaction.channel_id)
+            added, note = await add_query(
+                self.bot, player, query,
+                interaction.user.display_name, text_channel_id=interaction.channel_id)
         except Exception as e:
             try:
                 await interaction.followup.send(f"❌ {e}", ephemeral=True)
             except discord.NotFound:
                 pass
             return
-        msg = f"✅ 追加しました: **{added[0].title}**" if len(added) == 1 \
-            else f"✅ {len(added)}曲を追加しました"
+        if len(added) == 1:
+            msg = f"✅ 追加しました: **{added[0].title}**"
+        elif len(added) > 1:
+            msg = f"✅ {len(added)}曲を追加しました"
+        else:
+            msg = ""  # プレイリスト逐次追加中などは note 側が案内する
         if note:
-            msg += f"\n{note}"
+            msg = f"{msg}\n{note}" if msg else note
         try:
             await interaction.followup.send(msg, ephemeral=True)
         except discord.NotFound:
@@ -550,3 +491,4 @@ class MusicPanelView(discord.ui.View):
                     view=VolumeView(self.bot), ephemeral=True)
             except discord.NotFound:
                 pass
+
