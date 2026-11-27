@@ -16,7 +16,8 @@ from discord.ext import commands as ext_commands
 
 import store
 from core import bot, Track, COOKIE_FILE, filter_label, FILTERS, FFMPEG, OPUS_LOADED
-from player import (get_player, ensure_voice, add_query, add_tracks,
+from player import (get_player, ensure_voice, add_query, add_query_priority,
+                    add_tracks,
                     disconnect_player, set_volume, cycle_loop, LOOP_TEXT,
                     can_control, _wait_encrypt_ready, _can_encrypt,
                     pause_playback, resume_playback)
@@ -64,6 +65,33 @@ async def cmd_play(interaction: discord.Interaction, 入力: str):
         msg = ""  # プレイリスト逐次追加中などは note 側が案内する
     if note:
         msg = f"{msg}\n{note}" if msg else note
+    await interaction.followup.send(msg)
+
+
+@bot.tree.command(name="割り込み", description="曲をキューの先頭に入れて、現在の曲の次に再生します")
+@app_commands.describe(入力="曲名 / YouTube・SoundCloud URL / Spotifyリンク")
+async def cmd_priority(interaction: discord.Interaction, 入力: str):
+    if not await _require_control(interaction):
+        return
+    await interaction.response.defer()
+    player = _player(interaction)
+    try:
+        await ensure_voice(player, interaction.user)
+        added, note = await add_query_priority(bot, player, 入力, interaction.user.display_name,
+                                               text_channel_id=interaction.channel_id)
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
+        return
+    if len(added) == 1:
+        msg = f"⏭️ 次に再生します: **{added[0].title}**"
+    elif len(added) > 1:
+        msg = f"⏭️ {len(added)}曲を先頭に割り込み予約しました"
+    else:
+        msg = ""
+    if note:
+        msg = f"{msg}\n{note}" if msg else note
+    if player.loop_mode == "track":
+        msg += "\n（曲ループ中なので、ループを解除するまで割り込みは再生されません）"
     await interaction.followup.send(msg)
 
 
@@ -578,6 +606,7 @@ async def cmd_help(interaction: discord.Interaction):
     text = (
         "**🎵 超高機能音楽BOTの使い方**\n"
         "`/再生 <曲名 or URL>` 再生 / キュー追加（YouTube・SoundCloud・Spotify対応。"
+        "`/割り込み <曲名 or URL>` キューの先頭に入れて次に再生\n"
         "YouTubeが取得できない時は SoundCloud へ自動で切り替わります）\n"
         "`/パネル設置` セレクト1つで操作できる常設パネルを設置\n"
         "`/サブパネル設置` 再生中の曲（画像・進捗・リンク）パネルを設置\n"
