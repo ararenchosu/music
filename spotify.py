@@ -152,7 +152,7 @@ async def _fetch_collection_api(kind: str, spotify_id: str):
     取得状況は print でログに残す（Termuxで確認できる）。
     """
     global _token_cache
-    token = await _get_access_token()
+    token = await _web_token()
     if not token:
         print("[spotify] アクセストークン取得に失敗（埋め込み方式に切替）")
         return None, []
@@ -188,7 +188,7 @@ async def _fetch_collection_api(kind: str, spotify_id: str):
                             if resp.status == 401 and not token_refreshed:
                                 token_refreshed = True
                                 _token_cache = (None, 0)
-                                token = await _get_access_token()
+                                token = await _web_token()
                                 if not token:
                                     break
                                 continue
