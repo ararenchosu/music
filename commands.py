@@ -505,6 +505,82 @@ async def cmd_lyricspanel_setup(interaction: discord.Interaction):
         await update_lyrics_panel(bot, player)
 
 
+class SpotifyCodeModal(discord.ui.Modal, title="Spotify連携コード入力"):
+    code_input = discord.ui.TextInput(
+        label="リダイレクト先のURL（またはコード）",
+        style=discord.TextStyle.paragraph, required=True, max_length=1000,
+        placeholder="http://127.0.0.1:8888/callback?code=... のURL全体")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        import re as _re
+        import urllib.parse as _up
+        import spotify as spotify_mod
+        raw = str(self.code_input.value or "").strip()
+        m = _re.search(r"[?&]code=([^&\s]+)", raw)
+        code = _up.unquote(m.group(1)) if m else raw
+        ok = await spotify_mod.exchange_code(code)
+        if ok:
+            msg = ("✅ Spotify連携が完了しました。"
+                   "これで大きいプレイリストも全曲取得できます")
+        else:
+            msg = ("❌ 連携できませんでした。許可の直後に表示されたURLを、"
+                   "そのまま貼れているか確認してください"
+                   "（コードには有効期限があるので、古い場合は許可からやり直し）")
+        try:
+            await interaction.followup.send(msg, ephemeral=True)
+        except discord.NotFound:
+            pass
+
+
+class SpotifyLinkView(discord.ui.View):
+    def __init__(self, url: str, linked: bool):
+        super().__init__(timeout=600)
+        self.add_item(discord.ui.Button(
+            label="Spotifyで許可する", style=discord.ButtonStyle.link, url=url))
+        btn = discord.ui.Button(label="コードを入力", emoji="🔑",
+                                style=discord.ButtonStyle.primary)
+        btn.callback = self._code
+        self.add_item(btn)
+        if linked:
+            btn2 = discord.ui.Button(label="連携を解除",
+                                     style=discord.ButtonStyle.danger)
+            btn2.callback = self._unlink
+            self.add_item(btn2)
+
+    async def _code(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            await interaction.response.send_modal(SpotifyCodeModal())
+
+    async def _unlink(self, interaction: discord.Interaction):
+        import spotify as spotify_mod
+        spotify_mod.clear_user_auth()
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(
+                content="連携を解除しました", view=None)
+
+
+@bot.tree.command(name="Spotify連携", description="Spotifyアカウントを連携して、大きいプレイリストも全曲取得できるようにします")
+async def cmd_spotify_link(interaction: discord.Interaction):
+    import spotify as spotify_mod
+    if not spotify_mod.has_app_creds():
+        await interaction.response.send_message(
+            "先に .env に SPOTIFY_CLIENT_ID と SPOTIFY_CLIENT_SECRET を"
+            "設定して、BOTを再起動してください", ephemeral=True)
+        return
+    url = spotify_mod.build_authorize_url()
+    linked = spotify_mod.has_user_auth()
+    text = (
+        ("✅ Spotify連携済みです。\n" if linked else "")
+        + "**Spotify連携の手順**\n"
+        "1. 下の「Spotifyで許可する」を開いて、Spotifyで許可する\n"
+        "2. 許可すると `127.0.0.1` のページに移って「接続できません」と"
+        "出るけど、それで正常。そのページの**アドレスバーのURL全体**をコピー\n"
+        "3. 下の「コードを入力」に、そのURLを貼り付ける")
+    await interaction.response.send_message(
+        text, view=SpotifyLinkView(url, linked), ephemeral=True)
+
+
 @bot.tree.command(name="歌詞検索パネル設置", description="手動専用の歌詞検索パネルをこのチャンネルに設置します（自動更新なし）")
 @app_commands.default_permissions(administrator=True)
 async def cmd_lyrics_search_panel_setup(interaction: discord.Interaction):
@@ -672,6 +748,7 @@ async def cmd_help(interaction: discord.Interaction):
         "`/歌詞パネル設置` 再生中の曲の歌詞パネルを設置\n"
         "`/歌詞検索 <アーティスト> <曲名>` 作者と曲名を指定して歌詞を検索\n"
         "`/歌詞検索パネル設置` 手動専用の歌詞検索パネルを設置（自動更新なし）\n"
+        "`/Spotify連携` Spotifyアカウント連携（大きいプレイリストを全曲取るため）\n"
         "パネルの「📻 オートプレイ切替」で、キューが尽きた時に関連曲を自動再生\n"
         "`/一時停止` `/再開` `/スキップ` `/停止` 再生コントロール\n"
         "`/キュー` `/キュー削除` `/全消去` `/シャッフル` キュー管理\n"
