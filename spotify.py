@@ -12,7 +12,9 @@ Spotify は直接再生できないため、埋め込みページから曲名+�
 import base64
 import json
 import os
+from pathlib import Path
 import re
+import urllib.parse
 from typing import Optional
 
 import asyncio
@@ -138,6 +140,130 @@ async def _web_token() -> Optional[str]:
         return None
 
 
+# ---------------------------------------------------------------- ユーザー連携（認可コードフロー）
+# アプリ認証（Client Credentials）では他人の/大規模なプレイリスト曲目が
+# 403で読めないため、本人のSpotifyアカウントで連携して読むのが確実。
+# リフレッシュトークンは spotify_auth.json に保存する（.envには書かない）。
+REDIRECT_URI = os.environ.get("SPOTIFY_REDIRECT_URI",
+                              "http://127.0.0.1:8888/callback")
+_AUTH_FILE = Path(__file__).resolve().parent / "spotify_auth.json"
+_user_token_cache: tuple[str, float] = ("", 0.0)
+
+
+def _app_creds() -> tuple[str, str]:
+    return (os.environ.get("SPOTIFY_CLIENT_ID", "").strip(),
+            os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip())
+
+
+def has_app_creds() -> bool:
+    cid, secret = _app_creds()
+    return bool(cid and secret)
+
+
+def has_user_auth() -> bool:
+    try:
+        data = json.loads(_AUTH_FILE.read_text(encoding="utf-8"))
+        return bool(data.get("refresh_token"))
+    except Exception:
+        return False
+
+
+def clear_user_auth() -> None:
+    try:
+        _AUTH_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def build_authorize_url() -> Optional[str]:
+    cid, _ = _app_creds()
+    if not cid:
+        return None
+    params = {
+        "client_id": cid,
+        "response_type": "code",
+        "redirect_uri": REDIRECT_URI,
+        "scope": "playlist-read-private playlist-read-collaborative",
+    }
+    return ("https://accounts.spotify.com/authorize?"
+            + urllib.parse.urlencode(params))
+
+
+async def _token_post(form: dict) -> Optional[dict]:
+    cid, secret = _app_creds()
+    if not cid or not secret:
+        return None
+    basic = base64.b64encode(f"{cid}:{secret}".encode()).decode()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                    "https://accounts.spotify.com/api/token",
+                    headers={"Authorization": f"Basic {basic}",
+                             "Content-Type":
+                             "application/x-www-form-urlencoded"},
+                    data=form,
+                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    print(f"[spotify] トークン交換失敗 status={resp.status}")
+                    return None
+                return await resp.json()
+    except Exception as e:
+        print(f"[spotify] トークン交換エラー: {type(e).__name__}")
+        return None
+
+
+async def exchange_code(code: str) -> bool:
+    """認可コードをトークンに交換し、リフレッシュトークンを保存する。"""
+    data = await _token_post({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+    })
+    if not data or not data.get("refresh_token"):
+        return False
+    try:
+        _AUTH_FILE.write_text(
+            json.dumps({"refresh_token": data["refresh_token"]}),
+            encoding="utf-8")
+    except Exception:
+        return False
+    global _user_token_cache
+    _user_token_cache = (data.get("access_token", ""),
+                         _time.time() + int(data.get("expires_in", 3600)))
+    print("[spotify] Spotifyアカウント連携が完了しました")
+    return True
+
+
+async def _user_token() -> Optional[str]:
+    """連携済みユーザーのアクセストークン（リフレッシュで更新）。"""
+    global _user_token_cache
+    if not has_user_auth():
+        return None
+    token, expires = _user_token_cache
+    if token and _time.time() < expires - 60:
+        return token
+    try:
+        saved = json.loads(_AUTH_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    data = await _token_post({
+        "grant_type": "refresh_token",
+        "refresh_token": saved.get("refresh_token", ""),
+    })
+    if not data or not data.get("access_token"):
+        return None
+    if data.get("refresh_token"):
+        try:
+            _AUTH_FILE.write_text(
+                json.dumps({"refresh_token": data["refresh_token"]}),
+                encoding="utf-8")
+        except Exception:
+            pass
+    _user_token_cache = (data["access_token"],
+                         _time.time() + int(data.get("expires_in", 3600)))
+    return data["access_token"]
+
+
 _app_token_cache: tuple[str, float] = ("", 0.0)
 
 
@@ -148,8 +274,7 @@ async def _app_token() -> Optional[str]:
     場合のみ使う。これが一番確実な取得方法。
     """
     global _app_token_cache
-    cid = os.environ.get("SPOTIFY_CLIENT_ID", "").strip()
-    secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip()
+    cid, secret = _app_creds()
     if not cid or not secret:
         return None
     token, expires = _app_token_cache
@@ -222,6 +347,9 @@ async def _fetch_collection_api(kind: str, spotify_id: str):
     offset = 0
 
     sources: list[tuple[str, Optional[str]]] = []
+    user = await _user_token()
+    if user:
+        sources.append(("user", user))
     app = await _app_token()
     if app:
         sources.append(("app", app))
@@ -268,14 +396,17 @@ async def _fetch_collection_api(kind: str, spotify_id: str):
                                       f" offset={offset} token={src_name}"
                                       f" 試行{attempt + 1}/4")
                                 if resp.status == 401 and not refreshed \
-                                        and src_name in ("web", "app"):
+                                        and src_name in ("web", "app", "user"):
                                     refreshed = True
                                     if src_name == "web":
                                         _token_cache = ("", 0.0)
                                         token = await _web_token()
-                                    else:
+                                    elif src_name == "app":
                                         globals()["_app_token_cache"] = ("", 0.0)
                                         token = await _app_token()
+                                    else:
+                                        globals()["_user_token_cache"] = ("", 0.0)
+                                        token = await _user_token()
                                     if token:
                                         continue
                                 if resp.status == 429:
