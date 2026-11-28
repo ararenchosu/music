@@ -560,7 +560,7 @@ class SpotifyLinkView(discord.ui.View):
                 content="連携を解除しました", view=None)
 
 
-@bot.tree.command(name="Spotify連携", description="Spotifyアカウントを連携して、大きいプレイリストも全曲取得できるようにします")
+@bot.tree.command(name="spotify連携", description="Spotifyアカウントを連携して、大きいプレイリストも全曲取得できるようにします")
 async def cmd_spotify_link(interaction: discord.Interaction):
     import spotify as spotify_mod
     if not spotify_mod.has_app_creds():
@@ -748,7 +748,7 @@ async def cmd_help(interaction: discord.Interaction):
         "`/歌詞パネル設置` 再生中の曲の歌詞パネルを設置\n"
         "`/歌詞検索 <アーティスト> <曲名>` 作者と曲名を指定して歌詞を検索\n"
         "`/歌詞検索パネル設置` 手動専用の歌詞検索パネルを設置（自動更新なし）\n"
-        "`/Spotify連携` Spotifyアカウント連携（大きいプレイリストを全曲取るため）\n"
+        "`/spotify連携` Spotifyアカウント連携（大きいプレイリストを全曲取るため）\n"
         "パネルの「📻 オートプレイ切替」で、キューが尽きた時に関連曲を自動再生\n"
         "`/一時停止` `/再開` `/スキップ` `/停止` 再生コントロール\n"
         "`/キュー` `/キュー削除` `/全消去` `/シャッフル` キュー管理\n"
