@@ -13,6 +13,8 @@ import json
 import re
 from typing import Optional
 
+import asyncio
+
 import aiohttp
 
 TRACK_RE = re.compile(r"open\.spotify\.com/(?:intl-[a-z-]+/)?track/([A-Za-z0-9]+)")
@@ -144,31 +146,65 @@ def _query_of(track_obj) -> Optional[str]:
 
 
 async def _fetch_collection_api(kind: str, spotify_id: str):
-    """公式APIをページングして (名前, [検索語...全曲]) を返す。失敗時は (None, [])。"""
-    token = await _web_token()
+    """公式APIをページングして (名前, [検索語...全曲]) を返す。失敗時は (None, [])。
+
+    ページ取得に失敗したら再試行し、401ならトークンを取り直す。
+    取得状況は print でログに残す（Termuxで確認できる）。
+    """
+    global _token_cache
+    token = await _get_access_token()
     if not token:
+        print("[spotify] アクセストークン取得に失敗（埋め込み方式に切替）")
         return None, []
-    headers = {"Authorization": f"Bearer {token}", **_HEADERS}
     limit = 100 if kind == "playlist" else 50
     base = f"https://api.spotify.com/v1/{kind}s/{spotify_id}"
     name: Optional[str] = None
     queries: list[str] = []
+    total: Optional[int] = None
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(base, headers=headers,
-                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(
+                    base, headers={"Authorization": f"Bearer {token}",
+                                   **_HEADERS},
+                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     meta = await resp.json()
                     name = meta.get("name")
             offset = 0
+            token_refreshed = False
             while True:
                 page_url = f"{base}/tracks?limit={limit}&offset={offset}"
-                async with session.get(page_url, headers=headers,
-                                       timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                    if resp.status != 200:
-                        return (name, queries) if queries else (None, [])
-                    data = await resp.json()
+                data = None
+                for attempt in range(3):
+                    try:
+                        async with session.get(
+                                page_url,
+                                headers={"Authorization": f"Bearer {token}",
+                                         **_HEADERS},
+                                timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                break
+                            if resp.status == 401 and not token_refreshed:
+                                token_refreshed = True
+                                _token_cache = (None, 0)
+                                token = await _get_access_token()
+                                if not token:
+                                    break
+                                continue
+                            print(f"[spotify] ページ取得失敗 status={resp.status}"
+                                  f" offset={offset} 試行{attempt + 1}/3")
+                    except Exception as e:
+                        print(f"[spotify] ページ取得エラー offset={offset}"
+                              f" 試行{attempt + 1}/3: {type(e).__name__}")
+                    await asyncio.sleep(1.5)
+                if data is None:
+                    print(f"[spotify] ページ取得を断念 offset={offset}"
+                          f"（ここまで{len(queries)}曲）")
+                    break
                 items = data.get("items") or []
+                if total is None and data.get("total") is not None:
+                    total = int(data["total"])
                 if not items:
                     break
                 for item in items:
@@ -177,14 +213,14 @@ async def _fetch_collection_api(kind: str, spotify_id: str):
                     if q:
                         queries.append(q)
                 offset += len(items)
-                total = data.get("total")
-                if total is not None and offset >= int(total):
+                if total is not None and offset >= total:
                     break
                 if len(items) < limit:
                     break
-    except Exception:
-        return (name, queries) if queries else (None, [])
-    return name, queries
+    except Exception as e:
+        print(f"[spotify] API取得エラー: {type(e).__name__}（{len(queries)}曲で中断）")
+    print(f"[spotify] API取得結果: {len(queries)}曲 / 全{total}曲")
+    return (name, queries) if queries else (None, [])
 
 
 async def resolve_collection_queries(url: str) -> tuple[Optional[str], list[str]]:
@@ -200,7 +236,10 @@ async def resolve_collection_queries(url: str) -> tuple[Optional[str], list[str]
         if len(api_queries) >= 100:
             return api_name, api_queries
         emb_name, emb_queries = await _resolve_collection_embed(url)
+        print(f"[spotify] 埋め込み取得結果: {len(emb_queries)}曲")
         if len(emb_queries) > len(api_queries):
             return emb_name, emb_queries
         return api_name or emb_name, api_queries
-    return await _resolve_collection_embed(url)
+    name, queries = await _resolve_collection_embed(url)
+    print(f"[spotify] 埋め込み取得結果: {len(queries)}曲")
+    return name, queries
