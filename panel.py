@@ -23,7 +23,8 @@ from discord.ext import commands
 
 import store
 import lyrics as lyrics_mod
-from core import MAX_QUEUE_SHOW, FILTERS, FILTER_ORDER, filter_label
+from core import MAX_QUEUE_SHOW, FILTERS, FILTER_ORDER, filter_label, Track
+from sources import resolve_query, is_playlist_query
 from player import (GuildPlayer, PLAYERS, get_player, ensure_voice,
                     add_query, add_query_priority, add_tracks, play_next,
                     disconnect_player, set_volume, effective_seeds,
@@ -575,6 +576,157 @@ class AddSongModal(discord.ui.Modal, title="曲を追加"):
             pass
 
 
+# ---------------------------------------------------------------- マイリスト
+class MylistImportModal(discord.ui.Modal, title="プレイリストをマイリストに保存"):
+    name = discord.ui.TextInput(
+        label="保存先リスト名（新しい名前で新規作成・同じ名前で追加）",
+        placeholder="例: 失恋ソング",
+        max_length=50,
+    )
+    url = discord.ui.TextInput(
+        label="プレイリストURL（YouTube / Spotify / SoundCloud）",
+        placeholder="https://www.youtube.com/playlist?list=...",
+        max_length=500,
+    )
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await _safe_defer(interaction)
+        name = str(self.name.value).strip()
+        url = str(self.url.value).strip()
+        try:
+            if not name:
+                await interaction.followup.send("リスト名を入力してください", ephemeral=True)
+                return
+            if not is_playlist_query(url):
+                await interaction.followup.send(
+                    "プレイリストのURLを入れてください（YouTube / Spotify / SoundCloud）",
+                    ephemeral=True)
+                return
+            tracks, _note = await resolve_query(url, interaction.user.display_name)
+            added = store.import_to_mylist(
+                interaction.user.id, name, [t.to_dict() for t in tracks])
+            total = len(store.mylists(interaction.user.id).get(name, []))
+            await interaction.followup.send(
+                f"📂 マイリスト「{name}」に **{added}曲** を保存しました（全{total}曲）",
+                ephemeral=True)
+        except Exception as e:
+            try:
+                await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            except discord.NotFound:
+                pass
+
+
+class MylistView(discord.ui.View):
+    """マイリスト操作（押した人専用の一時View）。
+
+    リスト選択 → 再生 / 再生中の曲を追加 / 削除。URL取込はモーダルから。
+    """
+
+    def __init__(self, bot: commands.Bot, user_id: int):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.user_id = user_id
+        self.selected: Optional[str] = None
+        lists = store.mylists(user_id)
+        if lists:
+            options = [
+                discord.SelectOption(label=f"{name}（{len(tracks)}曲）", value=name)
+                for name, tracks in list(lists.items())[:25]
+            ]
+            sel = discord.ui.Select(placeholder="リストを選んでください", options=options)
+            sel.callback = self._on_pick
+            self.add_item(sel)
+        btn_play = discord.ui.Button(label="再生", emoji="▶️", style=discord.ButtonStyle.primary)
+        btn_play.callback = self._play
+        self.add_item(btn_play)
+        btn_add = discord.ui.Button(label="再生中の曲を追加", emoji="➕")
+        btn_add.callback = self._add_current
+        self.add_item(btn_add)
+        btn_import = discord.ui.Button(label="URLから保存", emoji="📥")
+        btn_import.callback = self._import
+        self.add_item(btn_import)
+        btn_delete = discord.ui.Button(label="リストを削除", emoji="🗑️", style=discord.ButtonStyle.danger)
+        btn_delete.callback = self._delete
+        self.add_item(btn_delete)
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        self.selected = interaction.data["values"][0]
+        try:
+            await interaction.response.send_message(
+                f"📂 「{self.selected}」を選択中（曲数: "
+                f"{len(store.mylists(self.user_id).get(self.selected, []))}曲）",
+                ephemeral=True)
+        except discord.NotFound:
+            pass
+
+    async def _play(self, interaction: discord.Interaction):
+        await _safe_defer(interaction)
+        try:
+            if not self.selected:
+                await interaction.followup.send("先にリストを選んでください", ephemeral=True)
+                return
+            if not can_control(interaction):
+                await interaction.followup.send(
+                    "再生にはDJロール（または管理者）が必要です", ephemeral=True)
+                return
+            tracks = [Track.from_dict(t, interaction.user.display_name)
+                      for t in store.mylists(self.user_id).get(self.selected, [])]
+            if not tracks:
+                await interaction.followup.send("そのリストは空です", ephemeral=True)
+                return
+            player = get_player(interaction.guild_id)
+            await ensure_voice(player, interaction.user)
+            await add_tracks(self.bot, player, tracks,
+                             text_channel_id=interaction.channel_id)
+            await interaction.followup.send(
+                f"📂 「{self.selected}」から {len(tracks)}曲 を追加しました", ephemeral=True)
+        except Exception as e:
+            try:
+                await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            except discord.NotFound:
+                pass
+
+    async def _add_current(self, interaction: discord.Interaction):
+        await _safe_defer(interaction)
+        try:
+            if not self.selected:
+                await interaction.followup.send("先にリストを選んでください", ephemeral=True)
+                return
+            player = get_player(interaction.guild_id)
+            if not player.current:
+                await interaction.followup.send("再生中の曲がありません", ephemeral=True)
+                return
+            if store.add_to_mylist(self.user_id, self.selected, player.current.to_dict()):
+                await interaction.followup.send(
+                    f"📂 「{self.selected}」に **{player.current.title}** を追加しました",
+                    ephemeral=True)
+            else:
+                await interaction.followup.send("そのリストがありません", ephemeral=True)
+        except discord.NotFound:
+            pass
+
+    async def _import(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            await interaction.response.send_modal(MylistImportModal(self.bot))
+
+    async def _delete(self, interaction: discord.Interaction):
+        await _safe_defer(interaction)
+        try:
+            if not self.selected:
+                await interaction.followup.send("先にリストを選んでください", ephemeral=True)
+                return
+            store.delete_mylist(self.user_id, self.selected)
+            await interaction.followup.send(
+                f"🗑 マイリスト「{self.selected}」を削除しました", ephemeral=True)
+            self.selected = None
+        except discord.NotFound:
+            pass
+
+
 # ---------------------------------------------------------------- フィルター選択
 class FilterView(discord.ui.View):
     def __init__(self, bot: commands.Bot):
@@ -1032,6 +1184,8 @@ class MusicPanelView(discord.ui.View):
                 discord.SelectOption(label="キュー表示", value="queue_show", emoji="📜"),
                 discord.SelectOption(label="キューから削除", value="queue_remove", emoji="🗑️"),
                 discord.SelectOption(label="再生中の曲をお気に入りに追加", value="fav_add", emoji="⭐"),
+                discord.SelectOption(label="マイリスト", value="mylist", emoji="📂",
+                                     description="保存したプレイリストの再生・URLから保存"),
                 discord.SelectOption(label="フィルター変更", value="filter", emoji="🎛️"),
                 discord.SelectOption(label="音量変更", value="volume", emoji="🔊"),
                 discord.SelectOption(label="オートプレイ切替", value="autoplay", emoji="📻",
@@ -1059,6 +1213,19 @@ class MusicPanelView(discord.ui.View):
                 await interaction.followup.send(text, ephemeral=True, **kwargs)
             except discord.NotFound:
                 pass
+
+        if action == "mylist":
+            # マイリストは個人機能なのでDJ権限チェックの前に開く（再生時のみ権限確認）
+            lists = store.mylists(interaction.user.id)
+            text = ("📂 マイリスト操作：リストを選んで再生できます"
+                    if lists else
+                    "📂 マイリストはまだありません。「📥 URLから保存」でプレイリストを取り込めます")
+            try:
+                await interaction.followup.send(
+                    text, view=MylistView(self.bot, interaction.user.id), ephemeral=True)
+            except discord.NotFound:
+                pass
+            return
 
         if not can_control(interaction):
             await say("この操作はDJロール（または管理者）が必要です")
