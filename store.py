@@ -206,6 +206,27 @@ def add_to_mylist(user_id: int, name: str, track_dict: dict) -> bool:
     return True
 
 
+def import_to_mylist(user_id: int, name: str, track_dicts: list) -> int:
+    """プレイリスト一括取込。リストが無ければ作り、URL重複を除いて追加する。
+
+    戻り値: 実際に追加できた曲数。
+    """
+    lists = mylists(user_id)
+    lst = lists.setdefault(name, [])
+    seen = {(t.get("webpage_url") or "") for t in lst}
+    added = 0
+    for td in track_dicts:
+        url = td.get("webpage_url") or ""
+        if url and url in seen:
+            continue
+        if url:
+            seen.add(url)
+        lst.append(td)
+        added += 1
+    save_data()
+    return added
+
+
 def remove_from_mylist(user_id: int, name: str, index: int) -> dict | None:
     lists = mylists(user_id)
     tracks = lists.get(name)
