@@ -332,7 +332,7 @@ async def cmd_favorite(interaction: discord.Interaction, 操作: str):
 # ---------------------------------------------------------------- マイリスト
 @bot.tree.command(name="マイリスト", description="自分専用プレイリストの作成 / 追加 / 再生 / 削除")
 @app_commands.describe(操作="やりたいこと", 名前="リスト名（作成・追加・再生・削除で使用）",
-                       URL="プレイリストのURL（「URLから作成」で使用）")
+                       url="プレイリストのURL（「URLから作成」で使用）")
 @app_commands.choices(操作=[
     app_commands.Choice(name="リストを作成", value="create"),
     app_commands.Choice(name="再生中の曲をリストに追加", value="add_current"),
@@ -342,7 +342,7 @@ async def cmd_favorite(interaction: discord.Interaction, 操作: str):
     app_commands.Choice(name="リストを削除", value="delete"),
     app_commands.Choice(name="リストから曲を削除", value="remove_track"),
 ])
-async def cmd_mylist(interaction: discord.Interaction, 操作: str, 名前: str = "", URL: str = ""):
+async def cmd_mylist(interaction: discord.Interaction, 操作: str, 名前: str = "", url: str = ""):
     uid = interaction.user.id
     player = _player(interaction)
     lists = store.mylists(uid)
@@ -393,7 +393,7 @@ async def cmd_mylist(interaction: discord.Interaction, 操作: str, 名前: str 
             ephemeral=True)
         return
     if 操作 == "import_url":
-        url = URL.strip()
+        url = url.strip()
         if not 名前:
             await interaction.response.send_message(
                 "保存先のリスト名を入れてください（新しい名前なら新規作成します）",
