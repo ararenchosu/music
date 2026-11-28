@@ -9,7 +9,9 @@ Spotify は直接再生できないため、埋め込みページから曲名+�
 - プレイリスト/アルバム -> (名前, [検索語...])
 """
 
+import base64
 import json
+import os
 import re
 from typing import Optional
 
@@ -136,6 +138,48 @@ async def _web_token() -> Optional[str]:
         return None
 
 
+_app_token_cache: tuple[str, float] = ("", 0.0)
+
+
+async def _app_token() -> Optional[str]:
+    """公式アプリ認証（Client Credentials）のトークン。
+
+    環境変数 SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET が設定されている
+    場合のみ使う。これが一番確実な取得方法。
+    """
+    global _app_token_cache
+    cid = os.environ.get("SPOTIFY_CLIENT_ID", "").strip()
+    secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip()
+    if not cid or not secret:
+        return None
+    token, expires = _app_token_cache
+    if token and _time.time() < expires - 60:
+        return token
+    basic = base64.b64encode(f"{cid}:{secret}".encode()).decode()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                    "https://accounts.spotify.com/api/token",
+                    headers={"Authorization": f"Basic {basic}",
+                             "Content-Type": "application/x-www-form-urlencoded"},
+                    data={"grant_type": "client_credentials"},
+                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    print(f"[spotify] アプリ認証失敗 status={resp.status}"
+                          "（ID/シークレットを確認してください）")
+                    return None
+                data = await resp.json()
+    except Exception as e:
+        print(f"[spotify] アプリ認証エラー: {type(e).__name__}")
+        return None
+    token = data.get("access_token")
+    if not token:
+        return None
+    _app_token_cache = (token, _time.time() + int(data.get("expires_in", 3600)))
+    print("[spotify] 公式アプリ認証のトークンを使用します")
+    return token
+
+
 async def _embed_token(kind: str, spotify_id: str) -> Optional[str]:
     """埋め込みページ内に書かれているアクセストークンを取り出す（予備手段）。"""
     html = await _fetch_embed(kind, spotify_id)
@@ -164,77 +208,109 @@ def _query_of(track_obj) -> Optional[str]:
 async def _fetch_collection_api(kind: str, spotify_id: str):
     """公式APIをページングして (名前, [検索語...全曲]) を返す。失敗時は (None, [])。
 
-    ページ取得に失敗したら再試行し、401ならトークンを取り直す。
-    取得状況は print でログに残す（Termuxで確認できる）。
+    - ページ失敗時は再試行（429は長めに待つ、401はトークン更新）
+    - 途中で詰まったら、もう一方のトークン（Web/埋め込み）に切り替えて
+      止まった位置から再開する
+    - 取得状況は print でログに残す（Termuxで確認できる）
     """
     global _token_cache
-    token = await _web_token()
-    if not token:
-        token = await _embed_token(kind, spotify_id)
-    if not token:
-        print("[spotify] アクセストークン取得に失敗（埋め込み方式に切替）")
-        return None, []
     limit = 100 if kind == "playlist" else 50
     base = f"https://api.spotify.com/v1/{kind}s/{spotify_id}"
     name: Optional[str] = None
     queries: list[str] = []
     total: Optional[int] = None
+    offset = 0
+
+    sources: list[tuple[str, Optional[str]]] = []
+    app = await _app_token()
+    if app:
+        sources.append(("app", app))
+    web = await _web_token()
+    if web:
+        sources.append(("web", web))
+    sources.append(("embed", None))  # 必要になったら取得する
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                    base, headers={"Authorization": f"Bearer {token}",
-                                   **_HEADERS},
-                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    meta = await resp.json()
-                    name = meta.get("name")
-            offset = 0
-            token_refreshed = False
-            while True:
-                page_url = f"{base}/tracks?limit={limit}&offset={offset}"
-                data = None
-                for attempt in range(3):
-                    try:
-                        async with session.get(
-                                page_url,
-                                headers={"Authorization": f"Bearer {token}",
-                                         **_HEADERS},
-                                timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                break
-                            if resp.status == 401 and not token_refreshed:
-                                token_refreshed = True
-                                _token_cache = (None, 0)
-                                token = await _web_token()
-                                if not token:
+            for src_name, token in sources:
+                if token is None:
+                    token = await _embed_token(kind, spotify_id)
+                    if not token:
+                        continue
+                refreshed = False
+                while True:
+                    # メタ情報（名前）は最初の成功時に取る
+                    if name is None:
+                        try:
+                            async with session.get(
+                                    base,
+                                    headers={"Authorization": f"Bearer {token}",
+                                             **_HEADERS},
+                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                                if resp.status == 200:
+                                    meta = await resp.json()
+                                    name = meta.get("name")
+                        except Exception:
+                            pass
+                    page_url = f"{base}/tracks?limit={limit}&offset={offset}"
+                    data = None
+                    for attempt in range(4):
+                        try:
+                            async with session.get(
+                                    page_url,
+                                    headers={"Authorization":
+                                             f"Bearer {token}", **_HEADERS},
+                                    timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
                                     break
-                                continue
-                            print(f"[spotify] ページ取得失敗 status={resp.status}"
-                                  f" offset={offset} 試行{attempt + 1}/3")
-                    except Exception as e:
-                        print(f"[spotify] ページ取得エラー offset={offset}"
-                              f" 試行{attempt + 1}/3: {type(e).__name__}")
-                    await asyncio.sleep(1.5)
-                if data is None:
-                    print(f"[spotify] ページ取得を断念 offset={offset}"
-                          f"（ここまで{len(queries)}曲）")
-                    break
-                items = data.get("items") or []
-                if total is None and data.get("total") is not None:
-                    total = int(data["total"])
-                if not items:
-                    break
-                for item in items:
-                    obj = item.get("track") if kind == "playlist" else item
-                    q = _query_of(obj)
-                    if q:
-                        queries.append(q)
-                offset += len(items)
+                                print(f"[spotify] ページ取得失敗 status={resp.status}"
+                                      f" offset={offset} token={src_name}"
+                                      f" 試行{attempt + 1}/4")
+                                if resp.status == 401 and not refreshed \
+                                        and src_name in ("web", "app"):
+                                    refreshed = True
+                                    if src_name == "web":
+                                        _token_cache = ("", 0.0)
+                                        token = await _web_token()
+                                    else:
+                                        globals()["_app_token_cache"] = ("", 0.0)
+                                        token = await _app_token()
+                                    if token:
+                                        continue
+                                if resp.status == 429:
+                                    await asyncio.sleep(5)
+                                    continue
+                        except Exception as e:
+                            print(f"[spotify] ページ取得エラー offset={offset}"
+                                  f" token={src_name} 試行{attempt + 1}/4:"
+                                  f" {type(e).__name__}")
+                        await asyncio.sleep(1.5)
+                    if data is None:
+                        print(f"[spotify] ページ取得を断念 offset={offset}"
+                              f" token={src_name}（{len(queries)}曲まで取得）")
+                        break  # 次のトークンで再開を試す
+                    items = data.get("items") or []
+                    if total is None and data.get("total") is not None:
+                        total = int(data["total"])
+                    if not items:
+                        offset = total if total is not None else offset
+                        break
+                    for item in items:
+                        obj = item.get("track") if kind == "playlist" else item
+                        q = _query_of(obj)
+                        if q:
+                            queries.append(q)
+                    offset += len(items)
+                    if total is not None and offset >= total:
+                        break
+                    if len(items) < limit:
+                        break
                 if total is not None and offset >= total:
-                    break
-                if len(items) < limit:
-                    break
+                    break  # 全曲取れた
+                if total is None and queries:
+                    break  # 終端まで来たとみなす
+                print(f"[spotify] トークンを切り替えて再開します offset={offset}")
     except Exception as e:
         print(f"[spotify] API取得エラー: {type(e).__name__}（{len(queries)}曲で中断）")
     print(f"[spotify] API取得結果: {len(queries)}曲 / 全{total}曲")
