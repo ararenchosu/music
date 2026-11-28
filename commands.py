@@ -27,7 +27,8 @@ from panel import (MusicPanelView, panel_embed, queue_embed,
                    SubPanelView, subpanel_embed, update_sub_panel,
                    LyricsPanelView, lyrics_embed)
 from sources import (extract_raw_youtube, summarize_formats,
-                     check_soundcloud, BUILD_TAG)
+                     check_soundcloud, BUILD_TAG,
+                     resolve_query, is_playlist_query)
 
 
 def _player(interaction: discord.Interaction):
@@ -74,6 +75,46 @@ async def cmd_play(interaction: discord.Interaction, 入力: str):
     if note:
         msg = f"{msg}\n{note}" if msg else note
     await interaction.followup.send(msg)
+
+
+@bot.tree.command(name="取込", description="プレイリスト書き出しファイル（CSV/txt）を読み込んで全曲キューに追加します")
+@app_commands.describe(ファイル="Exportifyで書き出したCSV、または1行1曲のtxt")
+async def cmd_import(interaction: discord.Interaction, ファイル: discord.Attachment):
+    if not await _require_control(interaction):
+        return
+    await interaction.response.defer()
+    player = _player(interaction)
+    name = (ファイル.filename or "").lower()
+    if not (name.endswith(".csv") or name.endswith(".txt")):
+        await interaction.followup.send("❌ CSV か txt ファイルを添付してください")
+        return
+    if ファイル.size > 3_000_000:
+        await interaction.followup.send("❌ ファイルが大きすぎます（3MBまで）")
+        return
+    try:
+        raw = await ファイル.read()
+        text = raw.decode("utf-8-sig", errors="replace")
+        from sources import parse_playlist_file
+        queries = parse_playlist_file(text)
+    except Exception as e:
+        await interaction.followup.send(f"❌ ファイルを読み取れませんでした: {e}")
+        return
+    if not queries:
+        await interaction.followup.send(
+            "❌ 曲が1つも読み取れませんでした。ExportifyのCSVか、"
+            "1行に1曲（アーティスト - 曲名など）のtxtにしてください")
+        return
+    try:
+        await ensure_voice(player, interaction.user)
+        from player import enqueue_query_list
+        note = await enqueue_query_list(
+            bot, player, queries, interaction.user.display_name,
+            f"取り込みファイル「{ファイル.filename}」", source="import")
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
+        return
+    player.text_channel_id = interaction.channel_id
+    await interaction.followup.send(note)
 
 
 @bot.tree.command(name="割り込み", description="曲をキューの先頭に入れて、現在の曲の次に再生します")
@@ -290,16 +331,18 @@ async def cmd_favorite(interaction: discord.Interaction, 操作: str):
 
 # ---------------------------------------------------------------- マイリスト
 @bot.tree.command(name="マイリスト", description="自分専用プレイリストの作成 / 追加 / 再生 / 削除")
-@app_commands.describe(操作="やりたいこと", 名前="リスト名（作成・追加・再生・削除で使用）")
+@app_commands.describe(操作="やりたいこと", 名前="リスト名（作成・追加・再生・削除で使用）",
+                       URL="プレイリストのURL（「URLから作成」で使用）")
 @app_commands.choices(操作=[
     app_commands.Choice(name="リストを作成", value="create"),
     app_commands.Choice(name="再生中の曲をリストに追加", value="add_current"),
+    app_commands.Choice(name="URLから作成（プレイリスト丸ごと保存）", value="import_url"),
     app_commands.Choice(name="一覧", value="list"),
     app_commands.Choice(name="再生（リストを全曲追加）", value="play"),
     app_commands.Choice(name="リストを削除", value="delete"),
     app_commands.Choice(name="リストから曲を削除", value="remove_track"),
 ])
-async def cmd_mylist(interaction: discord.Interaction, 操作: str, 名前: str = ""):
+async def cmd_mylist(interaction: discord.Interaction, 操作: str, 名前: str = "", URL: str = ""):
     uid = interaction.user.id
     player = _player(interaction)
     lists = store.mylists(uid)
@@ -347,6 +390,30 @@ async def cmd_mylist(interaction: discord.Interaction, 操作: str, 名前: str 
         await interaction.response.send_message(
             "追加先のリストを選んでください",
             view=NamePickView(bot, list(lists.keys()), handler, "追加先のリスト"),
+            ephemeral=True)
+        return
+    if 操作 == "import_url":
+        url = URL.strip()
+        if not 名前:
+            await interaction.response.send_message(
+                "保存先のリスト名を入れてください（新しい名前なら新規作成します）",
+                ephemeral=True)
+            return
+        if not url or not is_playlist_query(url):
+            await interaction.response.send_message(
+                "プレイリストのURLを入れてください（YouTube / Spotify / SoundCloud のプレイリスト）",
+                ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            tracks, _note = await resolve_query(url, interaction.user.display_name)
+        except Exception as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        added = store.import_to_mylist(uid, 名前, [t.to_dict() for t in tracks])
+        total = len(store.mylists(uid).get(名前, []))
+        await interaction.followup.send(
+            f"📂 マイリスト「{名前}」に **{added}曲** を保存しました（全{total}曲）",
             ephemeral=True)
         return
     # 以下は対象リストの指定が必要
@@ -742,6 +809,7 @@ async def cmd_help(interaction: discord.Interaction):
         "**🎵 超高機能音楽BOTの使い方**\n"
         "`/再生 <曲名 or URL>` 再生 / キュー追加（YouTube・SoundCloud・Spotify対応。"
         "`/割り込み <曲名 or URL>` キューの先頭に入れて次に再生\n"
+        "`/取込 <ファイル>` プレイリスト書き出しCSV/txtを全曲追加\n"
         "YouTubeが取得できない時は SoundCloud へ自動で切り替わります）\n"
         "`/パネル設置` セレクト1つで操作できる常設パネルを設置\n"
         "`/サブパネル設置` 再生中の曲（画像・進捗・リンク）パネルを設置\n"
