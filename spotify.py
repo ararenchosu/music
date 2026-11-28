@@ -120,6 +120,7 @@ async def _web_token() -> Optional[str]:
             async with session.get(url, headers=_HEADERS,
                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
+                    print(f"[spotify] トークン取得失敗 status={resp.status}")
                     return None
                 data = await resp.json()
         token = data.get("accessToken")
@@ -130,8 +131,23 @@ async def _web_token() -> Optional[str]:
                       "accessTokenExpirationTimestampMs") else 3000
         _token_cache = (token, _time.time() + max(600, ttl))
         return token
-    except Exception:
+    except Exception as e:
+        print(f"[spotify] トークン取得エラー: {type(e).__name__}")
         return None
+
+
+async def _embed_token(kind: str, spotify_id: str) -> Optional[str]:
+    """埋め込みページ内に書かれているアクセストークンを取り出す（予備手段）。"""
+    html = await _fetch_embed(kind, spotify_id)
+    if not html:
+        print("[spotify] 埋め込みページ取得に失敗（トークン予備手段も不可）")
+        return None
+    m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', html)
+    if not m:
+        print("[spotify] 埋め込みページ内にトークンが見つかりません")
+        return None
+    print("[spotify] 埋め込みページのトークンを使用します")
+    return m.group(1)
 
 
 def _query_of(track_obj) -> Optional[str]:
@@ -153,6 +169,8 @@ async def _fetch_collection_api(kind: str, spotify_id: str):
     """
     global _token_cache
     token = await _web_token()
+    if not token:
+        token = await _embed_token(kind, spotify_id)
     if not token:
         print("[spotify] アクセストークン取得に失敗（埋め込み方式に切替）")
         return None, []
